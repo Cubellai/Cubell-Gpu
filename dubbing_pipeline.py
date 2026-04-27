@@ -142,6 +142,14 @@ class DubbingPipeline:
             logger.exception("Whisper transcription failed for %s", video_path)
             raise RuntimeError(f"Whisper transcription failed for {video_path}: {exc}") from exc
 
+        if result is None:
+            raise RuntimeError(f"Whisper returned no result for {video_path}.")
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                f"Whisper returned an unexpected result type for {video_path}: "
+                f"{type(result).__name__}"
+            )
+
         text = str(result.get("text", "")).strip()
         if not text:
             raise RuntimeError(f"Whisper produced an empty transcript for {video_path}.")

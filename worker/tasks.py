@@ -77,6 +77,11 @@ def run_pipeline_steps(
 
     progress_callback("Transcribing", 10)
     transcription = pipeline.transcribe(original_video_path)
+    if transcription is None:
+        raise RuntimeError(f"Transcription failed for {original_video_path}: pipeline returned None.")
+    if not getattr(transcription, "text", None):
+        raise RuntimeError(f"Transcription failed for {original_video_path}: no transcript text returned.")
+
     transcript_path = job_work_dir / "transcript.json"
     transcript_path.write_text(
         json.dumps(
