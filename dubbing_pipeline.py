@@ -365,3 +365,75 @@ class DubbingPipeline:
             logger.error("%s failed. stdout=%s stderr=%s", step_name, completed.stdout, stderr)
             raise RuntimeError(f"{step_name} failed with exit code {completed.returncode}: {stderr}")
         logger.info("%s completed", step_name)
+
+
+def process_dubbing_job(job_id: str) -> str:
+    """Run a placeholder dubbing job and return the final output video path.
+
+    This function intentionally keeps the Whisper, NLLB, StyleTTS2, and MuseTalk
+    work as placeholders so the orchestration can be wired up first and the
+    model calls can be dropped in later.
+    """
+    import uuid
+    from datetime import UTC, datetime
+
+    from worker.db import Job, JobStatus, SessionLocal
+
+    output_dir = Path("/workspace/storage/results")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_video_path = output_dir / f"{job_id}.mp4"
+
+    def log_progress(message: str) -> None:
+        logger.info("%s job_id=%s", message, job_id)
+        print(message)
+
+    with SessionLocal() as db:
+        try:
+            job_uuid = uuid.UUID(job_id)
+        except ValueError as exc:
+            raise ValueError(f"Invalid dubbing job id: {job_id}") from exc
+
+        job = db.get(Job, job_uuid)
+        if job is None:
+            raise ValueError(f"Dubbing job not found: {job_id}")
+
+        # Keep the database state useful while the real model calls are still placeholders.
+        job.status = JobStatus.processing
+        job.progress_message = "Starting"
+        job.progress_percent = 0
+        job.error_message = None
+        job.updated_at = datetime.now(UTC)
+        db.add(job)
+        db.commit()
+
+        steps = [
+            ("Transcribing...", 20),
+            ("Translating...", 40),
+            ("Generating voice...", 65),
+            ("Performing lip sync...", 90),
+        ]
+
+        for message, percent in steps:
+            log_progress(message)
+            job.progress_message = message
+            job.progress_percent = percent
+            job.updated_at = datetime.now(UTC)
+            db.add(job)
+            db.commit()
+
+            # TODO: Replace these placeholders with the real pipeline calls:
+            # - Whisper transcription using job.original_video_path
+            # - NLLB translation using job.language
+            # - StyleTTS2 voice generation
+            # - MuseTalk lip synchronization into output_video_path
+
+        log_progress("Completed")
+        job.status = JobStatus.completed
+        job.progress_message = "Completed"
+        job.progress_percent = 100
+        job.result_path = str(output_video_path)
+        job.updated_at = datetime.now(UTC)
+        db.add(job)
+        db.commit()
+
+    return str(output_video_path)
