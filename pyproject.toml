@@ -1,0 +1,21 @@
+[project]
+name = "cubell-gpu-worker"
+version = "0.1.0"
+description = "GPU-ready Celery worker for Cubell dubbing jobs"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "celery[redis]>=5.4.0",
+    "psycopg[binary]>=3.2.1",
+    "pydantic-settings>=2.5.2",
+    "sqlalchemy>=2.0.35",
+]
+
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["worker*"]
+
+[tool.setuptools]
+py-modules = ["dubbing_pipeline"]
