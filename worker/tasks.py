@@ -4,7 +4,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-from dubbing_pipeline import DubbingPipeline
+from dubbing_pipeline import DubbingPipeline, process_dubbing_job as process_placeholder_dubbing_job
 from worker.celery_app import celery_app
 from worker.config import get_settings
 from worker.db import Job, JobStatus, SessionLocal
@@ -30,8 +30,15 @@ def update_progress(
 def process_dubbing_job(self, job_id: str) -> None:
     settings = get_settings()
 
+    try:
+        job_uuid = uuid.UUID(job_id)
+    except ValueError:
+        logger.warning("Running placeholder dubbing job without database row: %s", job_id)
+        process_placeholder_dubbing_job(job_id)
+        return
+
     with SessionLocal() as db:
-        job = db.get(Job, uuid.UUID(job_id))
+        job = db.get(Job, job_uuid)
         if job is None:
             logger.warning("Skipping missing dubbing job %s", job_id)
             return

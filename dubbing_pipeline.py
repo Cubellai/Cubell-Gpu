@@ -40,8 +40,8 @@ class DubbingPipeline:
         whisper_model,
         nllb_model,
         source_language_code,
-        require_cuda,
-        command_timeout_seconds,
+        require_cuda=True,
+        command_timeout_seconds=300,
     ):
         self.work_dir = Path(work_dir)
         self.result_dir = Path(result_dir)
