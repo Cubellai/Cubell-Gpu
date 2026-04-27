@@ -382,30 +382,40 @@ def process_dubbing_job(job_id: str) -> str:
     output_dir = Path("/workspace/storage/results")
     output_dir.mkdir(parents=True, exist_ok=True)
     output_video_path = output_dir / f"{job_id}.mp4"
+    job = None
+    db = None
 
     def log_progress(message: str) -> None:
         logger.info("%s job_id=%s", message, job_id)
         print(message)
 
-    with SessionLocal() as db:
-        try:
-            job_uuid = uuid.UUID(job_id)
-        except ValueError as exc:
-            raise ValueError(f"Invalid dubbing job id: {job_id}") from exc
-
-        job = db.get(Job, job_uuid)
-        if job is None:
-            raise ValueError(f"Dubbing job not found: {job_id}")
-
-        # Keep the database state useful while the real model calls are still placeholders.
-        job.status = JobStatus.processing
-        job.progress_message = "Starting"
-        job.progress_percent = 0
+    def save_progress(message: str, percent: int, *, status: JobStatus = JobStatus.processing) -> None:
+        if job is None or db is None:
+            return
+        job.status = status
+        job.progress_message = message
+        job.progress_percent = percent
         job.error_message = None
         job.updated_at = datetime.now(UTC)
         db.add(job)
         db.commit()
 
+    try:
+        job_uuid = uuid.UUID(job_id)
+    except ValueError:
+        job_uuid = None
+        logger.warning("Skipping database lookup for non-UUID dubbing job id: %s", job_id)
+
+    if job_uuid is not None:
+        db = SessionLocal()
+        job = db.get(Job, job_uuid)
+        if job is None:
+            logger.warning("Dubbing job not found in database; running placeholders only: %s", job_id)
+        else:
+            # Keep the database state useful while the real model calls are still placeholders.
+            save_progress("Starting", 0)
+
+    try:
         steps = [
             ("Transcribing...", 20),
             ("Translating...", 40),
@@ -415,11 +425,7 @@ def process_dubbing_job(job_id: str) -> str:
 
         for message, percent in steps:
             log_progress(message)
-            job.progress_message = message
-            job.progress_percent = percent
-            job.updated_at = datetime.now(UTC)
-            db.add(job)
-            db.commit()
+            save_progress(message, percent)
 
             # TODO: Replace these placeholders with the real pipeline calls:
             # - Whisper transcription using job.original_video_path
@@ -428,12 +434,11 @@ def process_dubbing_job(job_id: str) -> str:
             # - MuseTalk lip synchronization into output_video_path
 
         log_progress("Completed")
-        job.status = JobStatus.completed
-        job.progress_message = "Completed"
-        job.progress_percent = 100
-        job.result_path = str(output_video_path)
-        job.updated_at = datetime.now(UTC)
-        db.add(job)
-        db.commit()
+        if job is not None and db is not None:
+            job.result_path = str(output_video_path)
+            save_progress("Completed", 100, status=JobStatus.completed)
+    finally:
+        if db is not None:
+            db.close()
 
     return str(output_video_path)
