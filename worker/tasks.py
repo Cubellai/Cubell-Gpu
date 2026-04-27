@@ -29,13 +29,6 @@ def update_progress(
 @celery_app.task(name="cubell.gpu_worker.process_dubbing_job", bind=True, max_retries=0)
 def process_dubbing_job(self, job_id: str) -> None:
     settings = get_settings()
-    pipeline = DubbingPipeline(
-        work_dir=settings.worker_temp_dir,
-        result_dir=settings.result_dir,
-        whisper_model=settings.whisper_model,
-        nllb_model=settings.nllb_model,
-        source_language_code=settings.nllb_source_language_code,
-    )
 
     with SessionLocal() as db:
         job = db.get(Job, uuid.UUID(job_id))
@@ -43,15 +36,29 @@ def process_dubbing_job(self, job_id: str) -> None:
             logger.warning("Skipping missing dubbing job %s", job_id)
             return
 
-        update_progress(job, "Transcribing", 10)
+        update_progress(job, "Preparing pipeline", 5)
         db.add(job)
         db.commit()
 
         try:
+            pipeline = DubbingPipeline(
+                work_dir=settings.worker_temp_dir,
+                result_dir=settings.result_dir,
+                style_tts2_script=settings.style_tts2_script,
+                musetalk_script=settings.musetalk_script,
+                whisper_model=settings.whisper_model,
+                nllb_model=settings.nllb_model,
+                source_language_code=settings.nllb_source_language_code,
+                require_cuda=settings.require_cuda,
+                command_timeout_seconds=settings.command_timeout_seconds,
+            )
             original_video_path = Path(job.original_video_path)
             job_work_dir = settings.worker_temp_dir / str(job.id)
             job_work_dir.mkdir(parents=True, exist_ok=True)
 
+            update_progress(job, "Transcribing", 10)
+            db.add(job)
+            db.commit()
             transcription = pipeline.transcribe(original_video_path)
             transcript_path = job_work_dir / "transcript.json"
             transcript_path.write_text(

@@ -60,27 +60,47 @@ class DubbingPipeline:
         *,
         work_dir: Path,
         result_dir: Path,
+        style_tts2_script: Path | None,
+        musetalk_script: Path | None,
         whisper_model: str = "openai/whisper-large-v3",
         nllb_model: str = "facebook/nllb-200-1.3B",
         source_language_code: str = "eng_Latn",
+        require_cuda: bool = True,
+        command_timeout_seconds: int = 3600,
     ) -> None:
         self.work_dir = work_dir
         self.result_dir = result_dir
+        self.work_dir.mkdir(parents=True, exist_ok=True)
+        self.result_dir.mkdir(parents=True, exist_ok=True)
+        self.style_tts2_script = self._validate_script(style_tts2_script, "STYLE_TTS2_SCRIPT")
+        self.musetalk_script = self._validate_script(musetalk_script, "MUSETALK_SCRIPT")
         self.whisper_model_name = whisper_model
         self.nllb_model_name = nllb_model
         self.source_language_code = source_language_code
-        self.device = self._select_device()
+        self.command_timeout_seconds = command_timeout_seconds
+        self.device = self._select_device(require_cuda=require_cuda)
         self.torch_dtype = torch.float16 if self.device.type == "cuda" else torch.float32
         self._transcriber = None
         self._translator_tokenizer = None
         self._translator_model = None
 
     @staticmethod
-    def _select_device() -> torch.device:
+    def _validate_script(script_path: Path | None, env_name: str) -> Path:
+        if script_path is None:
+            raise PipelineConfigurationError(f"{env_name} must point to an inference script.")
+        resolved = script_path.expanduser().resolve()
+        if not resolved.is_file():
+            raise PipelineConfigurationError(f"{env_name} does not exist or is not a file: {resolved}")
+        return resolved
+
+    @staticmethod
+    def _select_device(*, require_cuda: bool) -> torch.device:
         if torch.cuda.is_available():
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.benchmark = True
             return torch.device("cuda")
+        if require_cuda:
+            raise PipelineConfigurationError("CUDA is required but is not available to PyTorch.")
         logger.warning("CUDA is not available; running the dubbing pipeline on CPU.")
         return torch.device("cpu")
 
@@ -203,15 +223,9 @@ class DubbingPipeline:
         target_language: str,
         output_audio: Path,
     ) -> None:
-        script = os.getenv("STYLE_TTS2_SCRIPT")
-        if not script:
-            raise PipelineConfigurationError(
-                "STYLE_TTS2_SCRIPT must point to a StyleTTS 2 inference script."
-            )
-
         command = [
             "python",
-            script,
+            str(self.style_tts2_script),
             "--text",
             text,
             "--reference_video",
@@ -229,18 +243,18 @@ class DubbingPipeline:
             "--embedding_scale",
             os.getenv("STYLE_TTS2_EMBEDDING_SCALE", "1.0"),
         ]
-        self._run_command(command, "StyleTTS 2 voice generation")
+        self._run_command(
+            command,
+            "StyleTTS 2 voice generation",
+            timeout_seconds=self.command_timeout_seconds,
+        )
         if not output_audio.is_file():
             raise RuntimeError(f"StyleTTS 2 did not create expected audio: {output_audio}")
 
     def lip_sync(self, *, source_video: Path, dubbed_audio: Path, output_video: Path) -> None:
-        script = os.getenv("MUSETALK_SCRIPT")
-        if not script:
-            raise PipelineConfigurationError("MUSETALK_SCRIPT must point to a MuseTalk inference script.")
-
         command = [
             "python",
-            script,
+            str(self.musetalk_script),
             "--video",
             str(source_video),
             "--audio",
@@ -252,7 +266,11 @@ class DubbingPipeline:
             "--batch_size",
             os.getenv("MUSETALK_BATCH_SIZE", "8"),
         ]
-        self._run_command(command, "MuseTalk lip synchronization")
+        self._run_command(
+            command,
+            "MuseTalk lip synchronization",
+            timeout_seconds=self.command_timeout_seconds,
+        )
         if not output_video.is_file():
             raise RuntimeError(f"MuseTalk did not create expected video: {output_video}")
 
@@ -326,16 +344,20 @@ class DubbingPipeline:
         return chunks or [text]
 
     @staticmethod
-    def _run_command(command: list[str], step_name: str) -> None:
+    def _run_command(command: list[str], step_name: str, *, timeout_seconds: int) -> None:
         logger.info("Starting %s", step_name)
         with tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8") as stderr_file:
-            completed = subprocess.run(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=stderr_file,
-                text=True,
-                check=False,
-            )
+            try:
+                completed = subprocess.run(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=stderr_file,
+                    text=True,
+                    check=False,
+                    timeout=timeout_seconds,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError(f"{step_name} timed out after {timeout_seconds} seconds.") from exc
             stderr_file.seek(0)
             stderr = stderr_file.read()
 
