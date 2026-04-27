@@ -2,9 +2,7 @@ import json
 import logging
 import re
 import shutil
-import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -321,64 +319,3 @@ class DubbingPipeline:
 
         return chunks or [text]
 
-
-def process_dubbing_job(job_id: str) -> str:
-    """Run a placeholder dubbing job and return the final output video path."""
-    from worker.db import Job, JobStatus, SessionLocal
-
-    output_dir = Path("/workspace/storage/results")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_video_path = output_dir / f"{job_id}.mp4"
-    job = None
-    db = None
-
-    def log_progress(message: str) -> None:
-        logger.info("%s job_id=%s", message, job_id)
-        print(message)
-
-    def save_progress(message: str, percent: int, *, status: JobStatus = JobStatus.processing) -> None:
-        if job is None or db is None:
-            return
-        job.status = status
-        job.progress_message = message
-        job.progress_percent = percent
-        job.error_message = None
-        job.updated_at = datetime.now(UTC)
-        db.add(job)
-        db.commit()
-
-    try:
-        job_uuid = uuid.UUID(job_id)
-    except ValueError:
-        job_uuid = None
-        logger.warning("Skipping database lookup for non-UUID dubbing job id: %s", job_id)
-
-    if job_uuid is not None:
-        db = SessionLocal()
-        job = db.get(Job, job_uuid)
-        if job is None:
-            logger.warning("Dubbing job not found in database; running placeholders only: %s", job_id)
-        else:
-            save_progress("Starting", 0)
-
-    try:
-        steps = [
-            ("Transcribing...", 20),
-            ("Translating...", 40),
-            ("Generating voice...", 65),
-            ("Performing lip sync...", 90),
-        ]
-
-        for message, percent in steps:
-            log_progress(message)
-            save_progress(message, percent)
-
-        log_progress("Completed")
-        if job is not None and db is not None:
-            job.result_path = str(output_video_path)
-            save_progress("Completed", 100, status=JobStatus.completed)
-    finally:
-        if db is not None:
-            db.close()
-
-    return str(output_video_path)
