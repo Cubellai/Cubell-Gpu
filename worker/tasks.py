@@ -18,6 +18,21 @@ TEST_VIDEO_ENV_VARS = (
     "INPUT_VIDEO_PATH",
     "ORIGINAL_VIDEO_PATH",
 )
+SUPPORTED_TEST_VIDEO_SUFFIXES = (".mp4", ".mov", ".mkv", ".webm", ".avi", ".wav", ".mp3", ".m4a")
+COMMON_TEST_VIDEO_NAMES = (
+    "input.mp4",
+    "test.mp4",
+    "sample.mp4",
+    "video.mp4",
+    "upload.mp4",
+)
+TEST_VIDEO_SEARCH_ROOTS = (
+    Path("/workspace/storage/uploads"),
+    Path("/workspace/storage"),
+    Path("/workspace"),
+    Path("/app/storage/uploads"),
+    Path("/app/storage"),
+)
 
 
 def update_progress(
@@ -99,6 +114,10 @@ def run_pipeline_steps(
 
 
 def resolve_test_video_path(job_id: str) -> Path:
+    direct_path = Path(job_id)
+    if direct_path.is_file():
+        return direct_path
+
     for env_name in TEST_VIDEO_ENV_VARS:
         value = os.getenv(env_name)
         if value:
@@ -113,15 +132,44 @@ def resolve_test_video_path(job_id: str) -> Path:
         Path(f"/app/storage/uploads/{job_id}.mp4"),
         Path(f"/app/storage/{job_id}.mp4"),
     ]
+    candidates.extend(Path.cwd() / name for name in COMMON_TEST_VIDEO_NAMES)
     for path in candidates:
         if path.is_file():
             return path
 
+    discovered_video = find_first_test_video()
+    if discovered_video is not None:
+        logger.warning("Using discovered test media file for non-UUID job %s: %s", job_id, discovered_video)
+        return discovered_video
+
     candidate_list = ", ".join(str(path) for path in candidates)
     raise FileNotFoundError(
         "Non-UUID test jobs must provide a real input video for Whisper. "
-        f"Set one of {', '.join(TEST_VIDEO_ENV_VARS)} or place a file at one of: {candidate_list}"
+        f"Pass the video path as job_id, set one of {', '.join(TEST_VIDEO_ENV_VARS)}, "
+        f"or place a file at one of: {candidate_list}"
     )
+
+
+def find_first_test_video() -> Path | None:
+    for root in TEST_VIDEO_SEARCH_ROOTS:
+        if not root.is_dir():
+            continue
+
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            if path.suffix.lower() not in SUPPORTED_TEST_VIDEO_SUFFIXES:
+                continue
+            if should_skip_test_video_path(path):
+                continue
+            return path
+
+    return None
+
+
+def should_skip_test_video_path(path: Path) -> bool:
+    parts = set(path.parts)
+    return bool({".git", "__pycache__", "results", "worker-temp"} & parts)
 
 
 def run_non_database_job(job_id: str, settings) -> None:
