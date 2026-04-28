@@ -181,22 +181,69 @@ def run_non_database_job(job_id: str, settings) -> None:
     logger.warning("Running real dubbing pipeline without database row: %s", job_id)
     target_language = os.getenv("CUBELL_TEST_TARGET_LANGUAGE", "Spanish")
     original_video_path = resolve_test_video_path(job_id)
-    pipeline = create_pipeline(settings)
-    job_work_dir = settings.worker_temp_dir / job_id
-    result_path = settings.result_dir / f"{job_id}.mp4"
+    pipeline = DubbingPipeline(
+        work_dir=settings.worker_temp_dir,
+        result_dir=settings.result_dir,
+        style_tts2_script=settings.style_tts2_script,
+        musetalk_script=settings.musetalk_script,
+        whisper_model=settings.whisper_model,
+        nllb_model=settings.nllb_model,
+        source_language_code=settings.nllb_source_language_code,
+        require_cuda=settings.require_cuda,
+        command_timeout_seconds=settings.command_timeout_seconds,
+    )
+    safe_job_id = Path(job_id).stem if Path(job_id).suffix else job_id.replace("/", "_")
+    job_work_dir = settings.worker_temp_dir / safe_job_id
+    result_path = settings.result_dir / f"{safe_job_id}.mp4"
+    job_work_dir.mkdir(parents=True, exist_ok=True)
+    result_path.parent.mkdir(parents=True, exist_ok=True)
 
     def log_progress(message: str, percent: int) -> None:
         logger.info("%s (%d%%) job_id=%s", message, percent, job_id)
         print(f"{message}...")
 
-    run_pipeline_steps(
-        pipeline=pipeline,
-        original_video_path=original_video_path,
-        job_work_dir=job_work_dir,
-        target_language=target_language,
-        result_path=result_path,
-        progress_callback=log_progress,
+    log_progress("Transcribing", 10)
+    transcription = pipeline.transcribe(original_video_path)
+    if transcription is None:
+        raise RuntimeError(f"Transcription failed for {original_video_path}: pipeline returned None.")
+    if not getattr(transcription, "text", None):
+        raise RuntimeError(f"Transcription failed for {original_video_path}: no transcript text returned.")
+
+    transcript_path = job_work_dir / "transcript.json"
+    transcript_path.write_text(
+        json.dumps(
+            {
+                "text": transcription.text,
+                "chunks": transcription.chunks,
+                "detected_language": transcription.detected_language,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
     )
+
+    log_progress("Translating", 35)
+    translated_text = pipeline.translate(transcription.text, target_language)
+    translation_path = job_work_dir / "translation.txt"
+    translation_path.write_text(translated_text, encoding="utf-8")
+
+    log_progress("Generating voice", 60)
+    voice_path = job_work_dir / "dubbed_voice.wav"
+    pipeline.generate_voice(
+        text=translated_text,
+        reference_video=original_video_path,
+        target_language=target_language,
+        output_audio=voice_path,
+    )
+
+    log_progress("Lip sync", 85)
+    pipeline.lip_sync(
+        source_video=original_video_path,
+        dubbed_audio=voice_path,
+        output_video=result_path,
+    )
+
     print("Completed")
     logger.info("Non-database dubbing job %s completed: %s", job_id, result_path)
 
