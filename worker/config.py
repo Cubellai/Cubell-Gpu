@@ -14,8 +14,8 @@ class Settings(BaseSettings):
     whisper_model: str = "openai/whisper-large-v3"
     nllb_model: str = "facebook/nllb-200-1.3B"
     nllb_source_language_code: str = "eng_Latn"
-    style_tts2_script: Path | None = None
-    musetalk_script: Path | None = None
+    style_tts2_script: Path = Path("/workspace/StyleTTS2/inference.py")
+    musetalk_script: Path = Path("/workspace/musetalk/inference.py")
     require_cuda: bool = True
     command_timeout_seconds: int = Field(default=3600, ge=1)
 

@@ -52,16 +52,16 @@ class DubbingPipeline:
 
     def __init__(
         self,
-        work_dir,
-        result_dir,
-        style_tts2_script,
-        musetalk_script,
-        whisper_model,
-        nllb_model,
-        source_language_code,
-        require_cuda=True,
-        command_timeout_seconds=300,
-    ):
+        work_dir: str | Path,
+        result_dir: str | Path,
+        style_tts2_script: str | Path | None,
+        musetalk_script: str | Path | None,
+        whisper_model: str,
+        nllb_model: str,
+        source_language_code: str,
+        require_cuda: bool = True,
+        command_timeout_seconds: int = 300,
+    ) -> None:
         self.work_dir = Path(work_dir)
         self.result_dir = Path(result_dir)
         self.style_tts2_script = Path(style_tts2_script) if style_tts2_script else None
