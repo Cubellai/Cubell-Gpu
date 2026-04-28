@@ -7,6 +7,8 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+NLLB_MODEL_NAME = "facebook/nllb-200-distilled-1.3B"
+
 NLLB_LANGUAGE_CODES = {
     "arabic": "arb_Arab",
     "english": "eng_Latn",
@@ -63,17 +65,16 @@ class DubbingPipeline:
         self.style_tts2_script = style_tts2_script
         self.musetalk_script = musetalk_script
         self.whisper_model = whisper_model or "openai/whisper-large-v3"
-        self.nllb_model = nllb_model or "facebook/nllb-200-1.3B"
+        self.nllb_model = NLLB_MODEL_NAME
         self.source_language_code = source_language_code or "eng_Latn"
         self.require_cuda = require_cuda
         self.command_timeout_seconds = command_timeout_seconds
         self.device, self.torch_dtype = self._select_device()
         self._transcriber = None
-        self._translator_tokenizer = None
-        self._translator_model = None
 
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self.result_dir.mkdir(parents=True, exist_ok=True)
+        self._translator_tokenizer, self._translator_model = self._load_translator()
 
     def run(self, input_video: Path, target_language: str) -> DubbingResult:
         """Run the placeholder pipeline end-to-end for direct callers."""
@@ -171,7 +172,8 @@ class DubbingPipeline:
         print(f"Translating to {target_language}")
 
         try:
-            tokenizer, model = self._get_translator()
+            tokenizer = self._translator_tokenizer
+            model = self._translator_model
             tokenizer.src_lang = self.source_language_code
             text_chunks = self._chunk_text_for_translation(str(text), tokenizer)
 
@@ -256,21 +258,21 @@ class DubbingPipeline:
             )
         return self._transcriber
 
-    def _get_translator(self):
-        if self._translator_model is None or self._translator_tokenizer is None:
-            try:
-                from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
-            except ImportError as exc:
-                raise RuntimeError("transformers is required for NLLB translation.") from exc
+    def _load_translator(self):
+        try:
+            from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+        except ImportError as exc:
+            raise RuntimeError("transformers is required for NLLB translation.") from exc
 
-            logger.info("Loading NLLB translation model: %s", self.nllb_model)
-            self._translator_tokenizer = AutoTokenizer.from_pretrained(self.nllb_model)
-            self._translator_model = AutoModelForSeq2SeqLM.from_pretrained(
-                self.nllb_model,
-                torch_dtype=self.torch_dtype,
-            ).to(self.device)
-            self._translator_model.eval()
-        return self._translator_tokenizer, self._translator_model
+        logger.info("Loading NLLB translation model: %s", self.nllb_model)
+        tokenizer = AutoTokenizer.from_pretrained(self.nllb_model)
+        model = AutoModelForSeq2SeqLM.from_pretrained(
+            self.nllb_model,
+            torch_dtype=self.torch_dtype,
+        ).to(self.device)
+        model.eval()
+        logger.info("Loaded NLLB translation model on %s", self.device)
+        return tokenizer, model
 
     def _resolve_target_language(self, target_language: str) -> str:
         normalized = str(target_language).strip()
