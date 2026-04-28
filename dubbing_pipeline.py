@@ -85,7 +85,7 @@ class DubbingPipeline:
         self._translator_tokenizer, self._translator_model = self._load_translator()
 
     def run(self, input_video: Path, target_language: str) -> DubbingResult:
-        """Run the placeholder pipeline end-to-end for direct callers."""
+        """Run the dubbing pipeline end-to-end for direct callers."""
         input_video = Path(input_video)
         job_work_dir = self.work_dir / input_video.stem
         job_work_dir.mkdir(parents=True, exist_ok=True)
@@ -127,17 +127,13 @@ class DubbingPipeline:
         logger.info("Transcribing %s with %s", video_path, self.whisper_model)
         print(f"Transcribing {video_path}")
 
-        try:
-            result = self._get_transcriber()(
-                str(video_path),
-                chunk_length_s=30,
-                stride_length_s=(5, 5),
-                return_timestamps=True,
-                generate_kwargs={"task": "transcribe"},
-            )
-        except Exception as exc:
-            logger.exception("Whisper transcription failed for %s", video_path)
-            raise RuntimeError(f"Whisper transcription failed for {video_path}: {exc}") from exc
+        result = self._get_transcriber()(
+            str(video_path),
+            chunk_length_s=30,
+            stride_length_s=(5, 5),
+            return_timestamps=True,
+            generate_kwargs={"task": "transcribe"},
+        )
 
         if result is None:
             raise RuntimeError(f"Whisper returned no result for {video_path}.")
@@ -167,37 +163,33 @@ class DubbingPipeline:
         logger.info("Translating transcript to %s with %s", target_language, self.nllb_model)
         print(f"Translating to {target_language}")
 
-        try:
-            tokenizer = self._translator_tokenizer
-            model = self._translator_model
-            tokenizer.src_lang = self.source_language_code
-            text_chunks = self._chunk_text_for_translation(str(text), tokenizer)
+        tokenizer = self._translator_tokenizer
+        model = self._translator_model
+        tokenizer.src_lang = self.source_language_code
+        text_chunks = self._chunk_text_for_translation(str(text), tokenizer)
 
-            import torch
+        import torch
 
-            translated_chunks = []
-            for text_chunk in text_chunks:
-                inputs = tokenizer(
-                    text_chunk,
-                    return_tensors="pt",
-                    truncation=True,
-                    max_length=900,
-                ).to(self.device)
+        translated_chunks = []
+        for text_chunk in text_chunks:
+            inputs = tokenizer(
+                text_chunk,
+                return_tensors="pt",
+                truncation=True,
+                max_length=900,
+            ).to(self.device)
 
-                with torch.inference_mode():
-                    generated_tokens = model.generate(
-                        **inputs,
-                        forced_bos_token_id=tokenizer.convert_tokens_to_ids(target_code),
-                        max_new_tokens=900,
-                        num_beams=5,
-                    )
-                translated_chunks.append(
-                    tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)[0]
+            with torch.inference_mode():
+                generated_tokens = model.generate(
+                    **inputs,
+                    forced_bos_token_id=tokenizer.convert_tokens_to_ids(target_code),
+                    max_new_tokens=900,
+                    num_beams=5,
                 )
-            translated_text = "\n".join(chunk.strip() for chunk in translated_chunks if chunk.strip())
-        except Exception as exc:
-            logger.exception("NLLB translation failed for target language %s", target_language)
-            raise RuntimeError(f"NLLB translation failed for {target_language}: {exc}") from exc
+            translated_chunks.append(
+                tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)[0]
+            )
+        translated_text = "\n".join(chunk.strip() for chunk in translated_chunks if chunk.strip())
 
         translated_text = translated_text.strip()
         if not translated_text:
@@ -221,18 +213,13 @@ class DubbingPipeline:
         logger.info("Generating voice using Fish Speech for job %s in %s", self.job_id, target_language)
         print(f"🎤 Generating voice using Fish Speech for: {target_language}")
 
-        try:
-            self._generate_voice_with_fish_speech(
-                text=text,
-                output_path=output_path,
-                output_dir=fish_output_dir,
-            )
-            logger.info("Fish Speech voice generation completed: %s", output_path)
-            print("✅ Voice generation completed")
-        except Exception as exc:
-            logger.warning("Fish Speech failed, falling back to placeholder: %s", exc)
-            self._generate_fallback_voice(output_path)
-            print("✅ Used fallback audio")
+        self._generate_voice_with_fish_speech(
+            text=text,
+            output_path=output_path,
+            output_dir=fish_output_dir,
+        )
+        logger.info("Fish Speech voice generation completed: %s", output_path)
+        print("✅ Voice generation completed")
 
         return output_path
 
@@ -438,30 +425,6 @@ class DubbingPipeline:
         )
         if not output_path.is_file():
             raise RuntimeError(f"Fish Speech did not create expected audio file: {output_path}")
-
-    @staticmethod
-    def _generate_fallback_voice(output_path: Path) -> None:
-        try:
-            subprocess.run(
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-f",
-                    "lavfi",
-                    "-i",
-                    "sine=frequency=440:duration=10",
-                    "-ar",
-                    "16000",
-                    "-ac",
-                    "1",
-                    str(output_path),
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-        except subprocess.CalledProcessError as exc:
-            raise RuntimeError(f"Fallback voice generation failed: {exc.stderr}") from exc
 
     @staticmethod
     def _resolve_fish_speech_repo_root(model_path: Path) -> Path | None:
