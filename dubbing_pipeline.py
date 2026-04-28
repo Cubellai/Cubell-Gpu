@@ -254,8 +254,7 @@ class DubbingPipeline:
         )
         print(f"Performing lip sync: {original_video_path} -> {output_video}")
         command = [
-            sys.executable,
-            str(musetalk_script),
+            *self._script_command(musetalk_script),
             "--video",
             str(original_video_path),
             "--audio",
@@ -344,6 +343,14 @@ class DubbingPipeline:
         if not resolved.is_file():
             raise FileNotFoundError(f"{env_name} script does not exist: {resolved}")
         return resolved
+
+    @staticmethod
+    def _script_command(script_path: Path) -> list[str]:
+        if script_path.suffix == ".py":
+            return [sys.executable, str(script_path)]
+        if script_path.suffix == ".sh":
+            return ["bash", str(script_path)]
+        return [str(script_path)]
 
     @staticmethod
     def _require_directory(directory_path: Path | None, env_name: str) -> Path:
