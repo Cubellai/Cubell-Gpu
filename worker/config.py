@@ -7,10 +7,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://lipdub:lipdub@postgres:5432/lipdub"
-    redis_url: str = "redis://redis:6379/0"
+    redis_url: str = "redis://localhost:6379/0"
     dubbing_queue: str = "dubbing"
-    result_dir: Path = Path("/app/storage/results")
-    worker_temp_dir: Path = Path("/app/storage/worker-temp")
+    result_dir: Path = Path("/workspace/storage/results")
+    worker_temp_dir: Path = Path("/workspace/storage/worker-temp")
     whisper_model: str = "openai/whisper-large-v3"
     nllb_model: str = "facebook/nllb-200-1.3B"
     nllb_source_language_code: str = "eng_Latn"
