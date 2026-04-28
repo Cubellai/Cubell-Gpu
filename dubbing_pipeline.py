@@ -10,6 +10,9 @@ from pathlib import Path
 
 from worker.config import get_settings
 
+os.environ.setdefault("TRANSFORMERS_NO_TORCHVISION", "1")
+os.environ.setdefault("TRANSFORMERS_NO_VISION", "1")
+
 logger = logging.getLogger(__name__)
 
 NLLB_MODEL_NAME = "facebook/nllb-200-distilled-1.3B"
