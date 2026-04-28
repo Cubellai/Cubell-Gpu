@@ -29,6 +29,7 @@ COMMON_TEST_VIDEO_NAMES = (
 TEST_VIDEO_SEARCH_ROOTS = (
     Path("/workspace/storage/uploads"),
     Path("/workspace/storage"),
+    Path("/workspace/Cubell-Gpu/uploads"),
     Path("/workspace"),
     Path("/app/storage/uploads"),
     Path("/app/storage"),
@@ -128,35 +129,41 @@ def resolve_test_video_path(job_id: str) -> Path:
                 return path
             raise FileNotFoundError(f"{env_name} points to a missing video file: {path}")
 
-    candidates = [
-        Path(f"/workspace/storage/uploads/{job_id}.mp4"),
-        Path(f"/workspace/storage/{job_id}.mp4"),
-        Path(f"/app/storage/uploads/{job_id}.mp4"),
-        Path(f"/app/storage/{job_id}.mp4"),
-    ]
-    candidates.extend(Path.cwd() / name for name in COMMON_TEST_VIDEO_NAMES)
+    candidates = build_job_media_candidates(job_id)
     for path in candidates:
         if path.is_file():
             return path
 
-    discovered_video = find_first_test_video()
-    if discovered_video is not None:
-        logger.warning("Using discovered test media file for non-UUID job %s: %s", job_id, discovered_video)
-        return discovered_video
+    matched_video = find_matching_test_video(job_id)
+    if matched_video is not None:
+        logger.warning("Using matching test media file for non-UUID job %s: %s", job_id, matched_video)
+        return matched_video
 
     candidate_list = ", ".join(str(path) for path in candidates)
     raise FileNotFoundError(
-        "Non-UUID test jobs must provide a real input video for Whisper. "
-        f"Pass the video path as job_id, set one of {', '.join(TEST_VIDEO_ENV_VARS)}, "
-        f"or place a file at one of: {candidate_list}"
+        "Non-UUID test jobs must provide a matching input media file for Whisper. "
+        f"Pass the media path as job_id, set one of {', '.join(TEST_VIDEO_ENV_VARS)}, "
+        f"or place a file matching the job id at one of: {candidate_list}"
     )
 
 
-def find_first_test_video() -> Path | None:
+def build_job_media_candidates(job_id: str) -> list[Path]:
+    job_stem = Path(job_id).stem if Path(job_id).suffix else job_id
+    candidates: list[Path] = []
+    for root in TEST_VIDEO_SEARCH_ROOTS:
+        for suffix in SUPPORTED_TEST_VIDEO_SUFFIXES:
+            candidates.append(root / f"{job_stem}{suffix}")
+
+    candidates.extend(Path.cwd() / name for name in COMMON_TEST_VIDEO_NAMES)
+    return candidates
+
+
+def find_matching_test_video(job_id: str) -> Path | None:
+    job_stem = Path(job_id).stem if Path(job_id).suffix else job_id
+
     for root in TEST_VIDEO_SEARCH_ROOTS:
         if not root.is_dir():
             continue
-
         for path in root.rglob("*"):
             if not path.is_file():
                 continue
@@ -164,7 +171,8 @@ def find_first_test_video() -> Path | None:
                 continue
             if should_skip_test_video_path(path):
                 continue
-            return path
+            if path.stem == job_stem:
+                return path
 
     return None
 
