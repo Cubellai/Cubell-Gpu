@@ -53,8 +53,6 @@ def create_pipeline(settings) -> DubbingPipeline:
     return DubbingPipeline(
         work_dir=settings.worker_temp_dir,
         result_dir=settings.result_dir,
-        style_tts2_script=settings.style_tts2_script,
-        musetalk_script=settings.musetalk_script,
         whisper_model=settings.whisper_model,
         nllb_model=settings.nllb_model,
         source_language_code=settings.nllb_source_language_code,
@@ -183,8 +181,6 @@ def run_non_database_job(job_id: str, settings) -> None:
     pipeline = DubbingPipeline(
         work_dir=settings.worker_temp_dir,
         result_dir=settings.result_dir,
-        style_tts2_script=settings.style_tts2_script,
-        musetalk_script=settings.musetalk_script,
         whisper_model=settings.whisper_model,
         nllb_model=settings.nllb_model,
         source_language_code=settings.nllb_source_language_code,

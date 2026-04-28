@@ -5,7 +5,8 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
+
+from worker.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -54,18 +55,17 @@ class DubbingPipeline:
         self,
         work_dir: str | Path,
         result_dir: str | Path,
-        style_tts2_script: str | Path | None,
-        musetalk_script: str | Path | None,
         whisper_model: str,
         nllb_model: str,
         source_language_code: str,
         require_cuda: bool = True,
         command_timeout_seconds: int = 300,
     ) -> None:
+        self.settings = get_settings()
         self.work_dir = Path(work_dir)
         self.result_dir = Path(result_dir)
-        self.style_tts2_script = Path(style_tts2_script) if style_tts2_script else None
-        self.musetalk_script = Path(musetalk_script) if musetalk_script else None
+        self.style_tts2_script = Path(self.settings.style_tts2_script)
+        self.musetalk_script = Path(self.settings.musetalk_script)
         self.whisper_model = whisper_model or "openai/whisper-large-v3"
         self.nllb_model = NLLB_MODEL_NAME
         self.source_language_code = source_language_code or "eng_Latn"
@@ -76,13 +76,6 @@ class DubbingPipeline:
 
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self.result_dir.mkdir(parents=True, exist_ok=True)
-        self.settings = SimpleNamespace(
-            worker_temp_dir=self.work_dir,
-            result_dir=self.result_dir,
-            style_tts2_script=self.style_tts2_script,
-            musetalk_script=self.musetalk_script,
-            command_timeout_seconds=self.command_timeout_seconds,
-        )
         self.job_id = "dubbing"
         self._translator_tokenizer, self._translator_model = self._load_translator()
 
@@ -111,6 +104,8 @@ class DubbingPipeline:
         translation_path = job_work_dir / "translation.txt"
         translation_path.write_text(translated_text, encoding="utf-8")
 
+        self.style_tts2_script = Path(self.settings.style_tts2_script)
+        self.musetalk_script = Path(self.settings.musetalk_script)
         self.set_job_id(input_video.stem)
         voice_path = self.generate_voice(text=translated_text, target_language=target_language)
         output_video = self.lip_sync(original_video_path=input_video, generated_audio_path=voice_path)
