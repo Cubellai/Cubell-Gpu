@@ -5,6 +5,7 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass
+from importlib.util import find_spec
 from pathlib import Path
 
 from worker.config import get_settings
@@ -211,38 +212,23 @@ class DubbingPipeline:
 
         output_path = self.settings.worker_temp_dir / f"{self.job_id}_voice.wav"
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        fish_output_dir = self.settings.worker_temp_dir / self.job_id / "fish-speech"
+        fish_output_dir.mkdir(parents=True, exist_ok=True)
 
         logger.info("Generating voice using Fish Speech for job %s in %s", self.job_id, target_language)
         print(f"🎤 Generating voice using Fish Speech for: {target_language}")
 
         try:
-            from fish_speech import FishSpeech
-
-            model = FishSpeech.from_pretrained("fishaudio/fish-speech-1.5")
-            audio = model.generate(text=text, language=target_language)
-            audio.save(str(output_path))
+            self._generate_voice_with_fish_speech(
+                text=text,
+                output_path=output_path,
+                output_dir=fish_output_dir,
+            )
             logger.info("Fish Speech voice generation completed: %s", output_path)
             print("✅ Voice generation completed")
         except Exception as exc:
             logger.warning("Fish Speech failed, falling back to placeholder: %s", exc)
-            # Fallback to sine wave
-            subprocess.run(
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-f",
-                    "lavfi",
-                    "-i",
-                    "sine=frequency=440:duration=10",
-                    "-ar",
-                    "16000",
-                    "-ac",
-                    "1",
-                    str(output_path),
-                ],
-                check=True,
-                capture_output=True,
-            )
+            self._generate_fallback_voice(output_path)
             print("✅ Used fallback audio")
 
         return output_path
@@ -371,6 +357,88 @@ class DubbingPipeline:
 
     def _fish_speech_device(self) -> str:
         return "cuda" if str(self.device).startswith("cuda") else "cpu"
+
+    def _generate_voice_with_fish_speech(
+        self,
+        *,
+        text: str,
+        output_path: Path,
+        output_dir: Path,
+    ) -> None:
+        fish_speech_model_path = self._require_directory(
+            self.settings.fish_speech_model_path,
+            "FISH_SPEECH_MODEL_PATH",
+        )
+        fish_speech_repo_root = self._resolve_fish_speech_repo_root(fish_speech_model_path)
+        has_repo_cli = (
+            fish_speech_repo_root is not None
+            and (
+                fish_speech_repo_root
+                / "fish_speech"
+                / "models"
+                / "text2semantic"
+                / "inference.py"
+            ).is_file()
+        )
+        has_installed_cli = find_spec("fish_speech.models.text2semantic.inference") is not None
+
+        if not has_repo_cli and not has_installed_cli:
+            raise RuntimeError(
+                "Fish Speech CLI module is not available. Expected "
+                "fish_speech.models.text2semantic.inference from the fish-speech repo/package."
+            )
+
+        command = [
+            sys.executable,
+            "-m",
+            "fish_speech.models.text2semantic.inference",
+            "--text",
+            text,
+            "--checkpoint-path",
+            str(fish_speech_model_path),
+            "--device",
+            self._fish_speech_device(),
+            "--output",
+            str(output_path),
+            "--output-dir",
+            str(output_dir),
+            "--no-compile",
+        ]
+        if self.torch_dtype_name == "float16":
+            command.append("--half")
+
+        self._run_command(
+            command,
+            "Fish Speech voice generation",
+            cwd=fish_speech_repo_root,
+            env=self._pythonpath_env(fish_speech_repo_root),
+        )
+        if not output_path.is_file():
+            raise RuntimeError(f"Fish Speech did not create expected audio file: {output_path}")
+
+    @staticmethod
+    def _generate_fallback_voice(output_path: Path) -> None:
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=440:duration=10",
+                    "-ar",
+                    "16000",
+                    "-ac",
+                    "1",
+                    str(output_path),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(f"Fallback voice generation failed: {exc.stderr}") from exc
 
     @staticmethod
     def _resolve_fish_speech_repo_root(model_path: Path) -> Path | None:
