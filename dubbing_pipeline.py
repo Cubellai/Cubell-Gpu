@@ -1,9 +1,11 @@
 import json
 import logging
 import re
-import shutil
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 logger = logging.getLogger(__name__)
 
@@ -62,8 +64,8 @@ class DubbingPipeline:
     ):
         self.work_dir = Path(work_dir)
         self.result_dir = Path(result_dir)
-        self.style_tts2_script = style_tts2_script
-        self.musetalk_script = musetalk_script
+        self.style_tts2_script = Path(style_tts2_script) if style_tts2_script else None
+        self.musetalk_script = Path(musetalk_script) if musetalk_script else None
         self.whisper_model = whisper_model or "openai/whisper-large-v3"
         self.nllb_model = NLLB_MODEL_NAME
         self.source_language_code = source_language_code or "eng_Latn"
@@ -74,6 +76,14 @@ class DubbingPipeline:
 
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self.result_dir.mkdir(parents=True, exist_ok=True)
+        self.settings = SimpleNamespace(
+            worker_temp_dir=self.work_dir,
+            result_dir=self.result_dir,
+            style_tts2_script=self.style_tts2_script,
+            musetalk_script=self.musetalk_script,
+            command_timeout_seconds=self.command_timeout_seconds,
+        )
+        self.job_id = "dubbing"
         self._translator_tokenizer, self._translator_model = self._load_translator()
 
     def run(self, input_video: Path, target_language: str) -> DubbingResult:
@@ -101,23 +111,9 @@ class DubbingPipeline:
         translation_path = job_work_dir / "translation.txt"
         translation_path.write_text(translated_text, encoding="utf-8")
 
-        voice_path = job_work_dir / "dubbed_voice.wav"
-        self.generate_voice(
-            text=translated_text,
-            reference_video=input_video,
-            target_language=target_language,
-            output_audio=voice_path,
-        )
-
-        output_video = self.result_dir / (
-            f"{input_video.stem}-{target_language.lower().replace(' ', '-')}-dubbed"
-            f"{input_video.suffix}"
-        )
-        self.lip_sync(
-            source_video=input_video,
-            dubbed_audio=voice_path,
-            output_video=output_video,
-        )
+        self.set_job_id(input_video.stem)
+        voice_path = self.generate_voice(text=translated_text, target_language=target_language)
+        output_video = self.lip_sync(original_video_path=input_video, generated_audio_path=voice_path)
 
         return DubbingResult(
             transcript_path=transcript_path,
@@ -210,22 +206,75 @@ class DubbingPipeline:
         logger.info("Completed translation to %s (%d characters)", target_language, len(translated_text))
         return translated_text
 
-    def generate_voice(self, text, reference_video, target_language, output_audio):
-        print(f"Generating voice for {target_language}")
-        output_audio = Path(output_audio)
+    def set_job_id(self, job_id: str) -> None:
+        self.job_id = self._safe_path_stem(job_id)
+
+    def generate_voice(self, text: str, target_language: str) -> Path:
+        if not text or not text.strip():
+            raise ValueError("Cannot generate voice from empty text.")
+        style_tts2_script = self._require_script(
+            self.settings.style_tts2_script,
+            "STYLE_TTS2_SCRIPT",
+        )
+
+        output_audio = self.settings.worker_temp_dir / f"{self.job_id}_voice.wav"
         output_audio.parent.mkdir(parents=True, exist_ok=True)
 
-        # Placeholder for StyleTTS2: write a dummy audio artifact for the worker.
-        with open(output_audio, "wb") as f:
-            f.write(b"dummy audio content")
+        logger.info("Generating voice for job %s with StyleTTS2: %s", self.job_id, output_audio)
+        print(f"Generating voice for {target_language}")
+        command = [
+            sys.executable,
+            str(style_tts2_script),
+            "--text",
+            text,
+            "--language",
+            target_language,
+            "--output",
+            str(output_audio),
+        ]
+        self._run_command(command, "StyleTTS2 voice generation")
 
-    def lip_sync(self, source_video, dubbed_audio, output_video):
-        print(f"Performing lip sync: {source_video} -> {output_video}")
-        output_video = Path(output_video)
+        if not output_audio.is_file():
+            raise RuntimeError(f"StyleTTS2 did not create expected audio file: {output_audio}")
+        logger.info("Generated voice audio for job %s: %s", self.job_id, output_audio)
+        return output_audio
+
+    def lip_sync(self, original_video_path: Path, generated_audio_path: Path) -> Path:
+        original_video_path = Path(original_video_path)
+        generated_audio_path = Path(generated_audio_path)
+        if not original_video_path.is_file():
+            raise FileNotFoundError(f"Original video not found for lip sync: {original_video_path}")
+        if not generated_audio_path.is_file():
+            raise FileNotFoundError(f"Generated audio not found for lip sync: {generated_audio_path}")
+
+        musetalk_script = self._require_script(self.settings.musetalk_script, "MUSETALK_SCRIPT")
+        output_video = self.settings.result_dir / f"{self.job_id}.mp4"
         output_video.parent.mkdir(parents=True, exist_ok=True)
 
-        # Placeholder for MuseTalk: copy the original video as the final result.
-        shutil.copy2(source_video, output_video)
+        logger.info(
+            "Running MuseTalk lip sync for job %s: video=%s audio=%s output=%s",
+            self.job_id,
+            original_video_path,
+            generated_audio_path,
+            output_video,
+        )
+        print(f"Performing lip sync: {original_video_path} -> {output_video}")
+        command = [
+            sys.executable,
+            str(musetalk_script),
+            "--video",
+            str(original_video_path),
+            "--audio",
+            str(generated_audio_path),
+            "--result",
+            str(output_video),
+        ]
+        self._run_command(command, "MuseTalk lip sync")
+
+        if not output_video.is_file():
+            raise RuntimeError(f"MuseTalk did not create expected video file: {output_video}")
+        logger.info("Generated dubbed video for job %s: %s", self.job_id, output_video)
+        return output_video
 
     def _select_device(self):
         try:
@@ -286,6 +335,50 @@ class DubbingPipeline:
         if target_code is None:
             raise ValueError(f"No NLLB language code configured for target language: {target_language}")
         return target_code
+
+    @staticmethod
+    def _safe_path_stem(value: str) -> str:
+        stem = Path(str(value)).stem if Path(str(value)).suffix else str(value)
+        return re.sub(r"[^A-Za-z0-9_.-]+", "_", stem).strip("._") or "dubbing"
+
+    @staticmethod
+    def _require_script(script_path: Path | None, env_name: str) -> Path:
+        if script_path is None:
+            raise RuntimeError(f"{env_name} must be configured before running this stage.")
+
+        resolved = Path(script_path).expanduser().resolve()
+        if not resolved.is_file():
+            raise FileNotFoundError(f"{env_name} script does not exist: {resolved}")
+        return resolved
+
+    def _run_command(self, command: list[str], step_name: str) -> None:
+        logger.info("Starting %s: %s", step_name, " ".join(command))
+        try:
+            completed = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=self.settings.command_timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"{step_name} timed out after {self.settings.command_timeout_seconds} seconds."
+            ) from exc
+
+        if completed.returncode != 0:
+            logger.error(
+                "%s failed with exit code %s. stdout=%s stderr=%s",
+                step_name,
+                completed.returncode,
+                completed.stdout,
+                completed.stderr,
+            )
+            raise RuntimeError(
+                f"{step_name} failed with exit code {completed.returncode}: {completed.stderr}"
+            )
+
+        logger.info("%s completed. stdout=%s", step_name, completed.stdout)
 
     @staticmethod
     def _chunk_text_for_translation(text: str, tokenizer, max_tokens: int = 850) -> list[str]:

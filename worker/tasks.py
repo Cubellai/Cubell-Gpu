@@ -74,6 +74,7 @@ def run_pipeline_steps(
 ) -> None:
     job_work_dir.mkdir(parents=True, exist_ok=True)
     result_path.parent.mkdir(parents=True, exist_ok=True)
+    pipeline.set_job_id(result_path.stem)
 
     progress_callback("Transcribing", 10)
     transcription = pipeline.transcribe(original_video_path)
@@ -102,20 +103,18 @@ def run_pipeline_steps(
     translation_path.write_text(translated_text, encoding="utf-8")
 
     progress_callback("Generating voice", 60)
-    voice_path = job_work_dir / "dubbed_voice.wav"
-    pipeline.generate_voice(
+    voice_path = pipeline.generate_voice(
         text=translated_text,
-        reference_video=original_video_path,
         target_language=target_language,
-        output_audio=voice_path,
     )
 
     progress_callback("Lip sync", 85)
-    pipeline.lip_sync(
-        source_video=original_video_path,
-        dubbed_audio=voice_path,
-        output_video=result_path,
+    final_video_path = pipeline.lip_sync(
+        original_video_path=original_video_path,
+        generated_audio_path=voice_path,
     )
+    if final_video_path != result_path:
+        raise RuntimeError(f"Lip sync wrote unexpected output path: {final_video_path}")
 
 
 def resolve_test_video_path(job_id: str) -> Path:
@@ -197,6 +196,7 @@ def run_non_database_job(job_id: str, settings) -> None:
     result_path = settings.result_dir / f"{safe_job_id}.mp4"
     job_work_dir.mkdir(parents=True, exist_ok=True)
     result_path.parent.mkdir(parents=True, exist_ok=True)
+    pipeline.set_job_id(result_path.stem)
 
     def log_progress(message: str, percent: int) -> None:
         logger.info("%s (%d%%) job_id=%s", message, percent, job_id)
@@ -229,20 +229,18 @@ def run_non_database_job(job_id: str, settings) -> None:
     translation_path.write_text(translated_text, encoding="utf-8")
 
     log_progress("Generating voice", 60)
-    voice_path = job_work_dir / "dubbed_voice.wav"
-    pipeline.generate_voice(
+    voice_path = pipeline.generate_voice(
         text=translated_text,
-        reference_video=original_video_path,
         target_language=target_language,
-        output_audio=voice_path,
     )
 
     log_progress("Lip sync", 85)
-    pipeline.lip_sync(
-        source_video=original_video_path,
-        dubbed_audio=voice_path,
-        output_video=result_path,
+    final_video_path = pipeline.lip_sync(
+        original_video_path=original_video_path,
+        generated_audio_path=voice_path,
     )
+    if final_video_path != result_path:
+        raise RuntimeError(f"Lip sync wrote unexpected output path: {final_video_path}")
 
     print("Completed")
     logger.info("Non-database dubbing job %s completed: %s", job_id, result_path)
