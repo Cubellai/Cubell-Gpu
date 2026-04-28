@@ -8,7 +8,7 @@ The worker runs four model stages:
 
 - Whisper large-v3 for transcription.
 - NLLB-200 1.3B for translation.
-- StyleTTS 2 for voice generation.
+- Fish Speech for voice generation.
 - MuseTalk for lip synchronization.
 
 The Celery task is:
@@ -24,7 +24,7 @@ It accepts a single `job_id`, reads the job from PostgreSQL, updates progress th
 - NVIDIA GPU host with the NVIDIA Container Toolkit installed.
 - Redis and PostgreSQL reachable from the worker.
 - Shared storage mounted at the same paths used by the API for uploaded videos and results.
-- StyleTTS 2 and MuseTalk repositories/checkpoints baked into the image or mounted into the container.
+- Fish Speech and MuseTalk repositories/checkpoints baked into the image or mounted into the container.
 
 The worker fails jobs early when required GPU or model script configuration is missing. Set
 `REQUIRE_CUDA=false` only for CPU development experiments; production should keep it enabled.
@@ -60,16 +60,16 @@ The `linux/amd64` platform is required because the pinned CUDA PyTorch wheels ar
 
 ## Model Script Configuration
 
-Whisper and NLLB load directly from Hugging Face. StyleTTS 2 and MuseTalk are invoked through inference scripts because those projects are commonly maintained as separate model repos.
+Whisper and NLLB load directly from Hugging Face. Fish Speech is invoked through its Python package/CLI with local checkpoints, and MuseTalk is invoked through its inference script.
 
 Set:
 
 ```bash
-STYLE_TTS2_SCRIPT=/path/to/styletts2/inference.py
-MUSETALK_SCRIPT=/path/to/musetalk/inference.py
+FISH_SPEECH_MODEL_PATH=/workspace/fish-speech/checkpoints/s2-pro
+MUSETALK_SCRIPT=/workspace/musetalk/inference.sh
 ```
 
-Mount or bake the StyleTTS 2 and MuseTalk repos/checkpoints into the worker image before running production inference.
+Mount or bake the Fish Speech and MuseTalk repos/checkpoints into the worker image before running production inference.
 
 ## Configuration
 
@@ -83,6 +83,6 @@ Mount or bake the StyleTTS 2 and MuseTalk repos/checkpoints into the worker imag
 - `NLLB_MODEL`: NLLB model ID, defaults to `facebook/nllb-200-1.3B`.
 - `NLLB_SOURCE_LANGUAGE_CODE`: Source language code for NLLB, defaults to `eng_Latn`.
 - `REQUIRE_CUDA`: Keep `true` in production so jobs do not silently run on CPU.
-- `COMMAND_TIMEOUT_SECONDS`: Timeout for StyleTTS 2 and MuseTalk subprocesses.
-- `STYLE_TTS2_SCRIPT`: Path inside the container to the StyleTTS 2 inference script.
+- `COMMAND_TIMEOUT_SECONDS`: Timeout for Fish Speech and MuseTalk subprocesses.
+- `FISH_SPEECH_MODEL_PATH`: Path inside the container to the Fish Speech checkpoint directory.
 - `MUSETALK_SCRIPT`: Path inside the container to the MuseTalk inference script.

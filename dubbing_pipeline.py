@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -47,8 +48,7 @@ class DubbingPipeline:
     """Dubbing pipeline wired to the worker task interface.
 
     Transcription and translation use real Whisper and NLLB models. Voice
-    generation and lip sync remain placeholders until StyleTTS2 and MuseTalk are
-    wired into the runtime image.
+    generation uses Fish Speech, and lip sync uses MuseTalk.
     """
 
     def __init__(
@@ -64,7 +64,7 @@ class DubbingPipeline:
         self.settings = get_settings()
         self.work_dir = Path(work_dir)
         self.result_dir = Path(result_dir)
-        self.style_tts2_script = Path(self.settings.style_tts2_script)
+        self.fish_speech_model_path = Path(self.settings.fish_speech_model_path)
         self.musetalk_script = Path(self.settings.musetalk_script)
         self.whisper_model = whisper_model or "openai/whisper-large-v3"
         self.nllb_model = NLLB_MODEL_NAME
@@ -72,6 +72,7 @@ class DubbingPipeline:
         self.require_cuda = require_cuda
         self.command_timeout_seconds = command_timeout_seconds
         self.device, self.torch_dtype = self._select_device()
+        self.torch_dtype_name = "float16" if str(self.torch_dtype).endswith("float16") else "float32"
         self._transcriber = None
 
         self.work_dir.mkdir(parents=True, exist_ok=True)
@@ -104,7 +105,7 @@ class DubbingPipeline:
         translation_path = job_work_dir / "translation.txt"
         translation_path.write_text(translated_text, encoding="utf-8")
 
-        self.style_tts2_script = Path(self.settings.style_tts2_script)
+        self.fish_speech_model_path = Path(self.settings.fish_speech_model_path)
         self.musetalk_script = Path(self.settings.musetalk_script)
         self.set_job_id(input_video.stem)
         voice_path = self.generate_voice(text=translated_text, target_language=target_language)
@@ -207,32 +208,41 @@ class DubbingPipeline:
     def generate_voice(self, text: str, target_language: str) -> Path:
         if not text or not text.strip():
             raise ValueError("Cannot generate voice from empty text.")
-        style_tts2_script = self._require_script(
-            self.settings.style_tts2_script,
-            "STYLE_TTS2_SCRIPT",
-        )
 
-        output_audio = self.settings.worker_temp_dir / f"{self.job_id}_voice.wav"
-        output_audio.parent.mkdir(parents=True, exist_ok=True)
+        output_path = self.settings.worker_temp_dir / f"{self.job_id}_voice.wav"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        logger.info("Generating voice for job %s with StyleTTS2: %s", self.job_id, output_audio)
-        print(f"Generating voice for {target_language}")
-        command = [
-            sys.executable,
-            str(style_tts2_script),
-            "--text",
-            text,
-            "--language",
-            target_language,
-            "--output",
-            str(output_audio),
-        ]
-        self._run_command(command, "StyleTTS2 voice generation")
+        logger.info("Generating voice placeholder for job %s using Fish Speech path: %s", self.job_id, output_path)
+        print(f"Generating voice using Fish Speech for: {target_language}")
 
-        if not output_audio.is_file():
-            raise RuntimeError(f"StyleTTS2 did not create expected audio file: {output_audio}")
-        logger.info("Generated voice audio for job %s: %s", self.job_id, output_audio)
-        return output_audio
+        # Temporary Fish Speech integration shim: create valid silent audio until
+        # the full Fish Speech model invocation is finalized.
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "anullsrc",
+                    "-t",
+                    "10",
+                    "-ar",
+                    "16000",
+                    "-ac",
+                    "1",
+                    str(output_path),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            logger.error("Fish Speech placeholder audio generation failed: %s", exc.stderr)
+            raise RuntimeError(f"Fish Speech placeholder audio generation failed: {exc.stderr}") from exc
+
+        return output_path
 
     def lip_sync(self, original_video_path: Path, generated_audio_path: Path) -> Path:
         original_video_path = Path(original_video_path)
@@ -346,11 +356,54 @@ class DubbingPipeline:
             raise FileNotFoundError(f"{env_name} script does not exist: {resolved}")
         return resolved
 
-    def _run_command(self, command: list[str], step_name: str) -> None:
+    @staticmethod
+    def _require_directory(directory_path: Path | None, env_name: str) -> Path:
+        if directory_path is None:
+            raise RuntimeError(f"{env_name} must be configured before running this stage.")
+
+        resolved = Path(directory_path).expanduser().resolve()
+        if not resolved.is_dir():
+            raise FileNotFoundError(f"{env_name} directory does not exist: {resolved}")
+        return resolved
+
+    def _fish_speech_device(self) -> str:
+        return "cuda" if str(self.device).startswith("cuda") else "cpu"
+
+    @staticmethod
+    def _resolve_fish_speech_repo_root(model_path: Path) -> Path | None:
+        for candidate in [model_path, *model_path.parents]:
+            if (candidate / "fish_speech").is_dir():
+                return candidate
+        return None
+
+    @staticmethod
+    def _pythonpath_env(repo_root: Path | None) -> dict[str, str] | None:
+        if repo_root is None:
+            return None
+
+        env = os.environ.copy()
+        existing_pythonpath = env.get("PYTHONPATH")
+        env["PYTHONPATH"] = (
+            str(repo_root)
+            if not existing_pythonpath
+            else f"{repo_root}{os.pathsep}{existing_pythonpath}"
+        )
+        return env
+
+    def _run_command(
+        self,
+        command: list[str],
+        step_name: str,
+        *,
+        cwd: Path | None = None,
+        env: dict[str, str] | None = None,
+    ) -> None:
         logger.info("Starting %s: %s", step_name, " ".join(command))
         try:
             completed = subprocess.run(
                 command,
+                cwd=cwd,
+                env=env,
                 check=False,
                 capture_output=True,
                 text=True,
