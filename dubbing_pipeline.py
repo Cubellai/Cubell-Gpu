@@ -269,6 +269,7 @@ class DubbingPipeline:
         model = AutoModelForSeq2SeqLM.from_pretrained(
             self.nllb_model,
             torch_dtype=self.torch_dtype,
+            use_safetensors=True,
         ).to(self.device)
         model.eval()
         logger.info("Loaded NLLB translation model on %s", self.device)
