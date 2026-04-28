@@ -289,6 +289,7 @@ class DubbingPipeline:
 
     def _get_transcriber(self):
         if self._transcriber is None:
+            self._disable_transformers_vision_backends()
             try:
                 from transformers import pipeline
             except ImportError as exc:
@@ -304,6 +305,7 @@ class DubbingPipeline:
         return self._transcriber
 
     def _load_translator(self):
+        self._disable_transformers_vision_backends()
         try:
             from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
         except ImportError as exc:
@@ -319,6 +321,17 @@ class DubbingPipeline:
         model.eval()
         logger.info("Loaded NLLB translation model on %s", self.device)
         return tokenizer, model
+
+    @staticmethod
+    def _disable_transformers_vision_backends() -> None:
+        """Prevent text/audio model loading from importing a broken torchvision."""
+        try:
+            from transformers.utils import import_utils
+        except Exception:
+            return
+
+        import_utils._torchvision_available = False
+        import_utils._torchvision_version = "unavailable"
 
     def _resolve_target_language(self, target_language: str) -> str:
         normalized = str(target_language).strip()
