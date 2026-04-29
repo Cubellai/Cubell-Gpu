@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "GPU-ready Celery worker for Cubell dubbing jobs"
 requires-python = ">=3.11,<3.12"
 dependencies = [
+    "boto3",
     "celery[redis]>=5.4.0",
     "psycopg[binary]>=3.2.1",
     "pydantic-settings>=2.5.2",

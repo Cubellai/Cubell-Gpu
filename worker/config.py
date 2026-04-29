@@ -18,6 +18,13 @@ class Settings(BaseSettings):
     musetalk_script: Path = Path("/workspace/musetalk/inference.sh")
     require_cuda: bool = True
     command_timeout_seconds: int = Field(default=3600, ge=1)
+    r2_bucket_name: str | None = None
+    r2_access_key_id: str | None = None
+    r2_secret_access_key: str | None = None
+    r2_account_id: str | None = None
+    r2_endpoint_url: str | None = None
+    r2_public_url: str | None = None
+    r2_presigned_url_expiration_seconds: int = Field(default=3600, ge=1)
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

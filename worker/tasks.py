@@ -9,6 +9,7 @@ from dubbing_pipeline import DubbingPipeline
 from worker.celery_app import celery_app
 from worker.config import get_settings
 from worker.db import Job, JobStatus, SessionLocal
+from worker.storage import JobStorage
 
 logger = logging.getLogger(__name__)
 
@@ -272,11 +273,12 @@ def process_dubbing_job(self, job_id: str) -> None:
 
         try:
             pipeline = create_pipeline(settings)
-            original_video_path = Path(job.original_video_path)
             job_work_dir = settings.worker_temp_dir / str(job.id)
-            result_path = settings.result_dir / (
-                f"{original_video_path.stem}-{job.language.lower().replace(' ', '-')}-dubbed"
-                f"{original_video_path.suffix}"
+            storage = JobStorage(settings)
+            prepared_input = storage.prepare_input(
+                original_reference=job.original_video_path,
+                target_language=job.language,
+                job_work_dir=job_work_dir,
             )
 
             def persist_progress(message: str, percent: int) -> None:
@@ -286,12 +288,15 @@ def process_dubbing_job(self, job_id: str) -> None:
 
             run_pipeline_steps(
                 pipeline=pipeline,
-                original_video_path=original_video_path,
+                original_video_path=prepared_input.local_path,
                 job_work_dir=job_work_dir,
                 target_language=job.language,
-                result_path=result_path,
+                result_path=prepared_input.result_path,
                 progress_callback=persist_progress,
             )
+            if prepared_input.uses_r2:
+                persist_progress("Uploading result", 95)
+            result_reference = storage.publish_result(prepared_input)
         except Exception as exc:
             logger.exception("Dubbing job %s failed", job_id)
             job.status = JobStatus.failed
@@ -303,7 +308,7 @@ def process_dubbing_job(self, job_id: str) -> None:
             raise
 
         update_progress(job, "Done", 100, status=JobStatus.completed)
-        job.result_path = str(result_path)
+        job.result_path = result_reference
         db.add(job)
         db.commit()
         logger.info("Dubbing job %s completed", job_id)
