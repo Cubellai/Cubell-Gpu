@@ -85,7 +85,7 @@ FISH_SPEECH_MODEL_PATH=/workspace/fish-speech/checkpoints/s2-pro
 MUSETALK_SCRIPT=/workspace/musetalk/inference.sh
 ```
 
-Mount or bake the Fish Speech and MuseTalk repos/checkpoints into the worker image before running production inference.
+Mount or bake the Fish Speech and MuseTalk repos/checkpoints into the worker image before running production inference. For Fish Speech voice cloning, set `FISH_SPEECH_PROMPT_TOKENS_PATH` to a real `.npy` prompt-token file and optionally set `FISH_SPEECH_PROMPT_TEXT`. Leave both unset for random voice generation.
 
 ## Configuration
 
@@ -101,6 +101,8 @@ Mount or bake the Fish Speech and MuseTalk repos/checkpoints into the worker ima
 - `REQUIRE_CUDA`: Keep `true` in production so jobs do not silently run on CPU.
 - `COMMAND_TIMEOUT_SECONDS`: Timeout for Fish Speech and MuseTalk subprocesses.
 - `FISH_SPEECH_MODEL_PATH`: Path inside the container to the Fish Speech checkpoint directory.
+- `FISH_SPEECH_PROMPT_TEXT`: Optional reference text for Fish Speech voice cloning.
+- `FISH_SPEECH_PROMPT_TOKENS_PATH`: Optional path to a real Fish Speech `.npy` prompt-token file for voice cloning.
 - `MUSETALK_SCRIPT`: Path inside the container to the MuseTalk inference script.
 - `R2_BUCKET_NAME`: Cloudflare R2 bucket name. Required for R2-backed jobs.
 - `R2_ACCESS_KEY_ID`: Cloudflare R2 access key ID. Required for R2-backed jobs.

@@ -412,8 +412,8 @@ class DubbingPipeline:
             str(output_path),
             "--output-dir",
             str(output_dir),
-            "--no-compile",
         ]
+        command.extend(self._fish_speech_prompt_args(text))
         if self.torch_dtype_name == "float16":
             command.append("--half")
 
@@ -425,6 +425,28 @@ class DubbingPipeline:
         )
         if not output_path.is_file():
             raise RuntimeError(f"Fish Speech did not create expected audio file: {output_path}")
+
+    def _fish_speech_prompt_args(self, text: str) -> list[str]:
+        prompt_tokens_path = self.settings.fish_speech_prompt_tokens_path
+        if prompt_tokens_path is None:
+            return []
+
+        prompt_tokens_path = Path(prompt_tokens_path).expanduser()
+        if not prompt_tokens_path.is_absolute():
+            prompt_tokens_path = self.work_dir / prompt_tokens_path
+        if not prompt_tokens_path.is_file():
+            raise FileNotFoundError(
+                "FISH_SPEECH_PROMPT_TOKENS_PATH must point to a real .npy file. "
+                f"Missing: {prompt_tokens_path}"
+            )
+
+        prompt_text = self.settings.fish_speech_prompt_text or self._short_prompt_text(text)
+        return [
+            "--prompt-text",
+            prompt_text,
+            "--prompt-tokens",
+            str(prompt_tokens_path),
+        ]
 
     @staticmethod
     def _resolve_fish_speech_repo_root(model_path: Path) -> Path | None:
@@ -446,6 +468,13 @@ class DubbingPipeline:
             else f"{repo_root}{os.pathsep}{existing_pythonpath}"
         )
         return env
+
+    @staticmethod
+    def _short_prompt_text(text: str, max_chars: int = 180) -> str:
+        text = " ".join(str(text).split())
+        if len(text) <= max_chars:
+            return text
+        return text[:max_chars].rsplit(" ", 1)[0] or text[:max_chars]
 
     def _run_command(
         self,

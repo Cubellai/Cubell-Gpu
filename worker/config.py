@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     nllb_model: str = "facebook/nllb-200-1.3B"
     nllb_source_language_code: str = "eng_Latn"
     fish_speech_model_path: Path = Path("/workspace/fish-speech/checkpoints/s2-pro")
+    fish_speech_prompt_text: str | None = None
+    fish_speech_prompt_tokens_path: Path | None = None
     musetalk_script: Path = Path("/workspace/musetalk/inference.sh")
     require_cuda: bool = True
     command_timeout_seconds: int = Field(default=3600, ge=1)
