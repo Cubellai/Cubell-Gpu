@@ -8,8 +8,8 @@ The worker runs four model stages:
 
 - Whisper large-v3 for transcription.
 - NLLB-200 1.3B for translation.
-- Fish Speech for voice generation.
-- MuseTalk for lip synchronization.
+- ElevenLabs for voice generation.
+- Sync Labs for lip synchronization.
 
 The Celery task is:
 
@@ -24,7 +24,8 @@ It accepts a single `job_id`, reads the job from PostgreSQL, updates progress th
 - NVIDIA GPU host with the NVIDIA Container Toolkit installed.
 - Redis and PostgreSQL reachable from the worker.
 - Shared storage mounted at the same paths used by the API for uploaded videos and results, or Cloudflare R2 credentials for object-backed uploads.
-- Fish Speech and MuseTalk repositories/checkpoints baked into the image or mounted into the container.
+- ElevenLabs API key for text-to-speech voice generation.
+- Sync Labs API key for lip synchronization.
 
 The worker fails jobs early when required GPU or model script configuration is missing. Set
 `REQUIRE_CUDA=false` only for CPU development experiments; production should keep it enabled.
@@ -54,7 +55,7 @@ docker run --rm --env-file .env --gpus all \
   cubell-gpu-worker
 ```
 
-The image expects Redis, PostgreSQL, storage configuration, and model script paths to be provided by the deployment environment.
+The image expects Redis, PostgreSQL, storage configuration, and API credentials to be provided by the deployment environment.
 It runs as an unprivileged `worker` user and defaults to `WORKER_CONCURRENCY=1` to avoid loading multiple large model copies on a single GPU.
 The `linux/amd64` platform is required because the pinned CUDA PyTorch wheels are published for NVIDIA Linux hosts.
 
@@ -72,20 +73,21 @@ The task message contains only the job UUID. The worker reads `original_video_pa
 - A local file path, such as `/app/storage/uploads/<file>.mp4`, when the API and worker share a mounted storage volume.
 - An R2 object key, such as `uploads/<file>.mp4`, when the API stores uploads in Cloudflare R2.
 
-For R2-backed jobs, the worker downloads `uploads/...` into `WORKER_TEMP_DIR`, writes the local MuseTalk result under `RESULT_DIR`, uploads it back to R2 as `results/<original>-<language>-dubbed.mp4`, and stores that `results/...` key in `job.result_path`.
+For R2-backed jobs, the worker downloads `uploads/...` into `WORKER_TEMP_DIR`, writes the local Sync Labs result under `RESULT_DIR`, uploads it back to R2 as `results/<original>-<language>-dubbed.mp4`, and stores that `results/...` key in `job.result_path`.
 
-## Model Script Configuration
+## Model Configuration
 
-Whisper and NLLB load directly from Hugging Face. Fish Speech is invoked through its Python package/CLI with local checkpoints, and MuseTalk is invoked through its inference script.
+Whisper and NLLB load directly from Hugging Face. ElevenLabs is used for hosted text-to-speech voice generation, and Sync Labs is used for hosted lip synchronization.
 
 Set:
 
 ```bash
-FISH_SPEECH_MODEL_PATH=/workspace/fish-speech/checkpoints/s2-pro
-MUSETALK_SCRIPT=/workspace/musetalk/inference.sh
+ELEVENLABS_API_KEY=...
+ELEVENLABS_VOICE_ID=21m00Tcm4TlvDq8ikWAM
+SYNCLABS_API_KEY=...
 ```
 
-Mount or bake the Fish Speech and MuseTalk repos/checkpoints into the worker image before running production inference. For Fish Speech voice cloning, set `FISH_SPEECH_PROMPT_TOKENS_PATH` to a real `.npy` prompt-token file and optionally set `FISH_SPEECH_PROMPT_TEXT`. Leave both unset for random voice generation.
+For ElevenLabs voice cloning, set `ELEVENLABS_REFERENCE_AUDIO_PATH` to a local reference audio file. Leave it unset to use `ELEVENLABS_VOICE_ID`.
 
 ## Configuration
 
@@ -99,11 +101,13 @@ Mount or bake the Fish Speech and MuseTalk repos/checkpoints into the worker ima
 - `NLLB_MODEL`: NLLB model ID, defaults to `facebook/nllb-200-1.3B`.
 - `NLLB_SOURCE_LANGUAGE_CODE`: Source language code for NLLB, defaults to `eng_Latn`.
 - `REQUIRE_CUDA`: Keep `true` in production so jobs do not silently run on CPU.
-- `COMMAND_TIMEOUT_SECONDS`: Timeout for Fish Speech and MuseTalk subprocesses.
-- `FISH_SPEECH_MODEL_PATH`: Path inside the container to the Fish Speech checkpoint directory.
-- `FISH_SPEECH_PROMPT_TEXT`: Optional reference text for Fish Speech voice cloning.
-- `FISH_SPEECH_PROMPT_TOKENS_PATH`: Optional path to a real Fish Speech `.npy` prompt-token file for voice cloning.
-- `MUSETALK_SCRIPT`: Path inside the container to the MuseTalk inference script.
+- `COMMAND_TIMEOUT_SECONDS`: Timeout for Sync Labs polling.
+- `ELEVENLABS_API_KEY`: ElevenLabs API key used for `/v1/text-to-speech`.
+- `ELEVENLABS_VOICE_ID`: Default ElevenLabs voice ID, defaults to `21m00Tcm4TlvDq8ikWAM`.
+- `ELEVENLABS_MODEL_ID`: ElevenLabs model ID, defaults to `eleven_multilingual_v2`.
+- `ELEVENLABS_REFERENCE_AUDIO_PATH`: Optional local reference audio path for ElevenLabs voice cloning.
+- `ELEVENLABS_CLONED_VOICE_NAME`: Optional name for cloned ElevenLabs voices.
+- `SYNCLABS_API_KEY`: Sync Labs API key used for `/v1/lip-sync`.
 - `R2_BUCKET_NAME`: Cloudflare R2 bucket name. Required for R2-backed jobs.
 - `R2_ACCESS_KEY_ID`: Cloudflare R2 access key ID. Required for R2-backed jobs.
 - `R2_SECRET_ACCESS_KEY`: Cloudflare R2 secret access key. Required for R2-backed jobs.

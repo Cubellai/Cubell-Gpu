@@ -2,10 +2,9 @@ import json
 import logging
 import os
 import re
-import subprocess
-import sys
+import time
 from dataclasses import dataclass
-from importlib.util import find_spec
+from io import BytesIO
 from pathlib import Path
 
 from worker.config import get_settings
@@ -16,6 +15,11 @@ os.environ.setdefault("TRANSFORMERS_NO_VISION", "1")
 logger = logging.getLogger(__name__)
 
 NLLB_MODEL_NAME = "facebook/nllb-200-distilled-1.3B"
+SYNCLABS_API_BASE_URL = "https://api.synclabs.so"
+SYNCLABS_LIP_SYNC_ENDPOINT = f"{SYNCLABS_API_BASE_URL}/v1/lip-sync"
+SYNCLABS_POLL_INTERVAL_SECONDS = 10
+SYNCLABS_TERMINAL_STATUSES = {"COMPLETED", "FAILED", "REJECTED"}
+ELEVENLABS_API_BASE_URL = "https://api.elevenlabs.io"
 
 NLLB_LANGUAGE_CODES = {
     "arabic": "arb_Arab",
@@ -52,7 +56,7 @@ class DubbingPipeline:
     """Dubbing pipeline wired to the worker task interface.
 
     Transcription and translation use real Whisper and NLLB models. Voice
-    generation uses Fish Speech, and lip sync uses MuseTalk.
+    generation uses ElevenLabs, and lip sync uses Sync Labs.
     """
 
     def __init__(
@@ -68,8 +72,6 @@ class DubbingPipeline:
         self.settings = get_settings()
         self.work_dir = Path(work_dir)
         self.result_dir = Path(result_dir)
-        self.fish_speech_model_path = Path(self.settings.fish_speech_model_path)
-        self.musetalk_script = Path(self.settings.musetalk_script)
         self.whisper_model = whisper_model or "openai/whisper-large-v3"
         self.nllb_model = NLLB_MODEL_NAME
         self.source_language_code = source_language_code or "eng_Latn"
@@ -109,11 +111,9 @@ class DubbingPipeline:
         translation_path = job_work_dir / "translation.txt"
         translation_path.write_text(translated_text, encoding="utf-8")
 
-        self.fish_speech_model_path = Path(self.settings.fish_speech_model_path)
-        self.musetalk_script = Path(self.settings.musetalk_script)
         self.set_job_id(input_video.stem)
-        voice_path = self.generate_voice(text=translated_text, target_language=target_language)
-        output_video = self.lip_sync(original_video_path=input_video, generated_audio_path=voice_path)
+        voice_path = Path(self.generate_voice(text=translated_text, language=target_language))
+        output_video = Path(self.lip_sync(str(input_video), str(voice_path)))
 
         return DubbingResult(
             transcript_path=transcript_path,
@@ -201,63 +201,320 @@ class DubbingPipeline:
     def set_job_id(self, job_id: str) -> None:
         self.job_id = self._safe_path_stem(job_id)
 
-    def generate_voice(self, text: str, target_language: str) -> Path:
+    def generate_voice(self, text: str, language: str = "es") -> str:
         if not text or not text.strip():
             raise ValueError("Cannot generate voice from empty text.")
 
         output_path = self.settings.worker_temp_dir / f"{self.job_id}_voice.wav"
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        fish_output_dir = self.settings.worker_temp_dir / self.job_id / "fish-speech"
-        fish_output_dir.mkdir(parents=True, exist_ok=True)
 
-        logger.info("Generating voice using Fish Speech for job %s in %s", self.job_id, target_language)
-        print(f"🎤 Generating voice using Fish Speech for: {target_language}")
+        logger.info("Generating voice using ElevenLabs for job %s in %s", self.job_id, language)
+        print(f"Generating voice using ElevenLabs for: {language}")
 
-        self._generate_voice_with_fish_speech(
+        voice_id = self._elevenlabs_voice_id()
+        audio_bytes = self._generate_voice_with_elevenlabs(
             text=text,
-            output_path=output_path,
-            output_dir=fish_output_dir,
+            voice_id=voice_id,
         )
-        logger.info("Fish Speech voice generation completed: %s", output_path)
-        print("✅ Voice generation completed")
+        self._write_elevenlabs_wav(audio_bytes=audio_bytes, output_path=output_path)
 
-        return output_path
+        logger.info("ElevenLabs voice generation completed: %s", output_path)
+        print("Voice generation completed")
 
-    def lip_sync(self, original_video_path: Path, generated_audio_path: Path) -> Path:
-        original_video_path = Path(original_video_path)
-        generated_audio_path = Path(generated_audio_path)
-        if not original_video_path.is_file():
-            raise FileNotFoundError(f"Original video not found for lip sync: {original_video_path}")
-        if not generated_audio_path.is_file():
-            raise FileNotFoundError(f"Generated audio not found for lip sync: {generated_audio_path}")
+        return str(output_path)
 
-        musetalk_script = self._require_script(self.settings.musetalk_script, "MUSETALK_SCRIPT")
+    def _elevenlabs_voice_id(self) -> str:
+        reference_audio_path = self.settings.elevenlabs_reference_audio_path
+        if reference_audio_path is None:
+            return self.settings.elevenlabs_voice_id
+
+        reference_audio_path = Path(reference_audio_path).expanduser()
+        if not reference_audio_path.is_file():
+            raise FileNotFoundError(
+                "ELEVENLABS_REFERENCE_AUDIO_PATH must point to a real audio file. "
+                f"Missing: {reference_audio_path}"
+            )
+
+        logger.info("Creating ElevenLabs cloned voice from %s", reference_audio_path)
+        return self._create_elevenlabs_voice_clone(reference_audio_path)
+
+    def _create_elevenlabs_voice_clone(self, reference_audio_path: Path) -> str:
+        import requests
+
+        api_key = self._require_elevenlabs_api_key()
+        headers = {"xi-api-key": api_key}
+        data = {
+            "name": self.settings.elevenlabs_cloned_voice_name,
+            "description": "Voice cloned for Cubell dubbing",
+        }
+
+        with reference_audio_path.open("rb") as audio_file:
+            files = {
+                "files": (
+                    reference_audio_path.name,
+                    audio_file,
+                    self._audio_content_type(reference_audio_path),
+                )
+            }
+            response = requests.post(
+                f"{ELEVENLABS_API_BASE_URL}/v1/voices/add",
+                headers=headers,
+                data=data,
+                files=files,
+                timeout=120,
+            )
+
+        if response.status_code >= 400:
+            raise RuntimeError(
+                "ElevenLabs voice cloning failed "
+                f"({response.status_code}): {response.text}"
+            )
+
+        payload = self._parse_json_response(response, "ElevenLabs voice cloning")
+        voice_id = self._extract_first_string(payload, ("voice_id", "voiceId", "id"))
+        if not voice_id:
+            raise RuntimeError(f"ElevenLabs voice cloning response did not include voice_id: {payload}")
+
+        logger.info("Created ElevenLabs cloned voice: %s", voice_id)
+        return voice_id
+
+    def _generate_voice_with_elevenlabs(self, *, text: str, voice_id: str) -> bytes:
+        import requests
+
+        api_key = self._require_elevenlabs_api_key()
+        response = requests.post(
+            f"{ELEVENLABS_API_BASE_URL}/v1/text-to-speech/{voice_id}",
+            headers={
+                "xi-api-key": api_key,
+                "Accept": "audio/mpeg",
+                "Content-Type": "application/json",
+            },
+            json={
+                "text": text,
+                "model_id": self.settings.elevenlabs_model_id,
+                "voice_settings": {
+                    "stability": 0.5,
+                    "similarity_boost": 0.75,
+                },
+            },
+            params={"output_format": "mp3_44100_128"},
+            timeout=180,
+        )
+
+        if response.status_code >= 400:
+            raise RuntimeError(
+                "ElevenLabs text-to-speech failed "
+                f"({response.status_code}): {response.text}"
+            )
+        if not response.content:
+            raise RuntimeError("ElevenLabs returned an empty audio response.")
+
+        return response.content
+
+    @staticmethod
+    def _write_elevenlabs_wav(*, audio_bytes: bytes, output_path: Path) -> None:
+        try:
+            from pydub import AudioSegment
+        except ImportError as exc:
+            raise RuntimeError("pydub is required to convert ElevenLabs audio to WAV.") from exc
+
+        try:
+            audio = AudioSegment.from_file(BytesIO(audio_bytes), format="mp3")
+            audio.export(output_path, format="wav")
+        except Exception as exc:
+            raise RuntimeError(f"Failed to write ElevenLabs WAV output: {output_path}") from exc
+
+        if not output_path.is_file():
+            raise RuntimeError(f"ElevenLabs WAV output was not created: {output_path}")
+
+    @staticmethod
+    def _require_elevenlabs_api_key() -> str:
+        api_key = os.getenv("ELEVENLABS_API_KEY")
+        if not api_key:
+            raise RuntimeError("ELEVENLABS_API_KEY must be set to generate voice.")
+        return api_key
+
+    @staticmethod
+    def _audio_content_type(path: Path) -> str:
+        suffix = path.suffix.lower()
+        if suffix == ".wav":
+            return "audio/wav"
+        if suffix == ".mp3":
+            return "audio/mpeg"
+        if suffix == ".m4a":
+            return "audio/mp4"
+        if suffix == ".ogg":
+            return "audio/ogg"
+        return "application/octet-stream"
+
+    def lip_sync(self, video_path: str, audio_path: str) -> str:
+        """Run Sync Labs lip sync and download the completed video locally."""
+        video_file = Path(video_path)
+        audio_file = Path(audio_path)
+        if not video_file.is_file():
+            raise FileNotFoundError(f"Original video not found for Sync Labs lip sync: {video_file}")
+        if not audio_file.is_file():
+            raise FileNotFoundError(f"Generated audio not found for Sync Labs lip sync: {audio_file}")
+
+        api_key = os.getenv("SYNCLABS_API_KEY")
+        if not api_key:
+            raise RuntimeError("SYNCLABS_API_KEY must be set to run Sync Labs lip sync.")
+
         output_video = self.settings.result_dir / f"{self.job_id}.mp4"
         output_video.parent.mkdir(parents=True, exist_ok=True)
 
         logger.info(
-            "Running MuseTalk lip sync for job %s: video=%s audio=%s output=%s",
+            "Starting Sync Labs lip sync for job %s: video=%s audio=%s output=%s",
             self.job_id,
-            original_video_path,
-            generated_audio_path,
+            video_file,
+            audio_file,
             output_video,
         )
-        print(f"Performing lip sync: {original_video_path} -> {output_video}")
-        command = [
-            *self._script_command(musetalk_script),
-            "--video",
-            str(original_video_path),
-            "--audio",
-            str(generated_audio_path),
-            "--result",
-            str(output_video),
-        ]
-        self._run_command(command, "MuseTalk lip sync")
+        print(f"Performing Sync Labs lip sync: {video_file} -> {output_video}")
+
+        job_id = self._create_synclabs_lip_sync_job(
+            api_key=api_key,
+            video_path=video_file,
+            audio_path=audio_file,
+        )
+        output_url = self._poll_synclabs_lip_sync_job(api_key=api_key, job_id=job_id)
+        self._download_synclabs_output(output_url=output_url, output_path=output_video)
 
         if not output_video.is_file():
-            raise RuntimeError(f"MuseTalk did not create expected video file: {output_video}")
-        logger.info("Generated dubbed video for job %s: %s", self.job_id, output_video)
-        return output_video
+            raise RuntimeError(f"Sync Labs did not create expected video file: {output_video}")
+        logger.info("Generated Sync Labs dubbed video for job %s: %s", self.job_id, output_video)
+        return str(output_video)
+
+    def _create_synclabs_lip_sync_job(
+        self,
+        *,
+        api_key: str,
+        video_path: Path,
+        audio_path: Path,
+    ) -> str:
+        import requests
+
+        headers = {"x-api-key": api_key}
+        data = {
+            "model": "lipsync-2",
+            "sync_mode": "cut_off",
+        }
+
+        # Sync Labs accepts the source media as multipart files on /v1/lip-sync.
+        # Keep the files open only for the request lifetime so large media is not
+        # loaded fully into Python memory.
+        with video_path.open("rb") as video_file, audio_path.open("rb") as audio_file:
+            files = {
+                "video": (video_path.name, video_file, "video/mp4"),
+                "audio": (audio_path.name, audio_file, "audio/wav"),
+            }
+            response = requests.post(
+                SYNCLABS_LIP_SYNC_ENDPOINT,
+                headers=headers,
+                data=data,
+                files=files,
+                timeout=120,
+            )
+
+        if response.status_code >= 400:
+            raise RuntimeError(
+                "Sync Labs lip sync request failed "
+                f"({response.status_code}): {response.text}"
+            )
+
+        payload = self._parse_json_response(response, "Sync Labs lip sync request")
+        job_id = self._extract_first_string(payload, ("id", "job_id", "jobId", "generation_id"))
+        if not job_id:
+            raise RuntimeError(f"Sync Labs response did not include a job id: {payload}")
+
+        logger.info("Sync Labs lip sync job submitted: %s", job_id)
+        return job_id
+
+    def _poll_synclabs_lip_sync_job(self, *, api_key: str, job_id: str) -> str:
+        import requests
+
+        headers = {"x-api-key": api_key}
+        status_url = f"{SYNCLABS_LIP_SYNC_ENDPOINT}/{job_id}"
+        deadline = time.monotonic() + self.settings.command_timeout_seconds
+
+        while True:
+            response = requests.get(status_url, headers=headers, timeout=60)
+            if response.status_code >= 400:
+                raise RuntimeError(
+                    "Sync Labs status request failed "
+                    f"({response.status_code}): {response.text}"
+                )
+
+            payload = self._parse_json_response(response, "Sync Labs status request")
+            status = (self._extract_first_string(payload, ("status", "state")) or "").upper()
+            logger.info("Sync Labs lip sync job %s status: %s", job_id, status or "unknown")
+
+            if status == "COMPLETED":
+                output_url = self._extract_synclabs_output_url(payload)
+                if not output_url:
+                    raise RuntimeError(f"Sync Labs job completed without output URL: {payload}")
+                return output_url
+
+            if status in SYNCLABS_TERMINAL_STATUSES:
+                error = payload.get("error") or payload.get("message") or payload
+                raise RuntimeError(f"Sync Labs lip sync job {job_id} ended with {status}: {error}")
+
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"Sync Labs lip sync job {job_id} timed out after "
+                    f"{self.settings.command_timeout_seconds} seconds."
+                )
+
+            time.sleep(SYNCLABS_POLL_INTERVAL_SECONDS)
+
+    @staticmethod
+    def _download_synclabs_output(*, output_url: str, output_path: Path) -> None:
+        import requests
+
+        with requests.get(output_url, stream=True, timeout=300) as response:
+            if response.status_code >= 400:
+                raise RuntimeError(
+                    "Sync Labs output download failed "
+                    f"({response.status_code}): {response.text}"
+                )
+            with output_path.open("wb") as output_file:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        output_file.write(chunk)
+
+    @staticmethod
+    def _parse_json_response(response, request_name: str) -> dict:
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise RuntimeError(f"{request_name} returned non-JSON response: {response.text}") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"{request_name} returned unexpected JSON payload: {payload}")
+        return payload
+
+    @staticmethod
+    def _extract_first_string(payload: dict, keys: tuple[str, ...]) -> str | None:
+        for key in keys:
+            value = payload.get(key)
+            if isinstance(value, str) and value:
+                return value
+        return None
+
+    def _extract_synclabs_output_url(self, payload: dict) -> str | None:
+        output_url = self._extract_first_string(
+            payload,
+            ("output_url", "outputUrl", "video_url", "videoUrl", "url"),
+        )
+        if output_url:
+            return output_url
+
+        output = payload.get("output") or payload.get("result")
+        if isinstance(output, dict):
+            return self._extract_first_string(
+                output,
+                ("url", "video_url", "videoUrl", "output_url", "outputUrl"),
+            )
+        return None
 
     def _select_device(self):
         try:
@@ -336,183 +593,6 @@ class DubbingPipeline:
     def _safe_path_stem(value: str) -> str:
         stem = Path(str(value)).stem if Path(str(value)).suffix else str(value)
         return re.sub(r"[^A-Za-z0-9_.-]+", "_", stem).strip("._") or "dubbing"
-
-    @staticmethod
-    def _require_script(script_path: Path | None, env_name: str) -> Path:
-        if script_path is None:
-            raise RuntimeError(f"{env_name} must be configured before running this stage.")
-
-        resolved = Path(script_path).expanduser().resolve()
-        if not resolved.is_file():
-            raise FileNotFoundError(f"{env_name} script does not exist: {resolved}")
-        return resolved
-
-    @staticmethod
-    def _script_command(script_path: Path) -> list[str]:
-        if script_path.suffix == ".py":
-            return [sys.executable, str(script_path)]
-        if script_path.suffix == ".sh":
-            return ["bash", str(script_path)]
-        return [str(script_path)]
-
-    @staticmethod
-    def _require_directory(directory_path: Path | None, env_name: str) -> Path:
-        if directory_path is None:
-            raise RuntimeError(f"{env_name} must be configured before running this stage.")
-
-        resolved = Path(directory_path).expanduser().resolve()
-        if not resolved.is_dir():
-            raise FileNotFoundError(f"{env_name} directory does not exist: {resolved}")
-        return resolved
-
-    def _fish_speech_device(self) -> str:
-        return "cuda" if str(self.device).startswith("cuda") else "cpu"
-
-    def _generate_voice_with_fish_speech(
-        self,
-        *,
-        text: str,
-        output_path: Path,
-        output_dir: Path,
-    ) -> None:
-        fish_speech_model_path = self._require_directory(
-            self.settings.fish_speech_model_path,
-            "FISH_SPEECH_MODEL_PATH",
-        )
-        fish_speech_repo_root = self._resolve_fish_speech_repo_root(fish_speech_model_path)
-        has_repo_cli = (
-            fish_speech_repo_root is not None
-            and (
-                fish_speech_repo_root
-                / "fish_speech"
-                / "models"
-                / "text2semantic"
-                / "inference.py"
-            ).is_file()
-        )
-        has_installed_cli = find_spec("fish_speech.models.text2semantic.inference") is not None
-
-        if not has_repo_cli and not has_installed_cli:
-            raise RuntimeError(
-                "Fish Speech CLI module is not available. Expected "
-                "fish_speech.models.text2semantic.inference from the fish-speech repo/package."
-            )
-
-        command = [
-            sys.executable,
-            "-m",
-            "fish_speech.models.text2semantic.inference",
-            "--text",
-            text,
-            "--checkpoint-path",
-            str(fish_speech_model_path),
-            "--device",
-            self._fish_speech_device(),
-            "--output",
-            str(output_path),
-            "--output-dir",
-            str(output_dir),
-        ]
-        command.extend(self._fish_speech_prompt_args(text))
-        if self.torch_dtype_name == "float16":
-            command.append("--half")
-
-        self._run_command(
-            command,
-            "Fish Speech voice generation",
-            cwd=fish_speech_repo_root,
-            env=self._pythonpath_env(fish_speech_repo_root),
-        )
-        if not output_path.is_file():
-            raise RuntimeError(f"Fish Speech did not create expected audio file: {output_path}")
-
-    def _fish_speech_prompt_args(self, text: str) -> list[str]:
-        prompt_tokens_path = self.settings.fish_speech_prompt_tokens_path
-        if prompt_tokens_path is None:
-            return []
-
-        prompt_tokens_path = Path(prompt_tokens_path).expanduser()
-        if not prompt_tokens_path.is_absolute():
-            prompt_tokens_path = self.work_dir / prompt_tokens_path
-        if not prompt_tokens_path.is_file():
-            raise FileNotFoundError(
-                "FISH_SPEECH_PROMPT_TOKENS_PATH must point to a real .npy file. "
-                f"Missing: {prompt_tokens_path}"
-            )
-
-        prompt_text = self.settings.fish_speech_prompt_text or self._short_prompt_text(text)
-        return [
-            "--prompt-text",
-            prompt_text,
-            "--prompt-tokens",
-            str(prompt_tokens_path),
-        ]
-
-    @staticmethod
-    def _resolve_fish_speech_repo_root(model_path: Path) -> Path | None:
-        for candidate in [model_path, *model_path.parents]:
-            if (candidate / "fish_speech").is_dir():
-                return candidate
-        return None
-
-    @staticmethod
-    def _pythonpath_env(repo_root: Path | None) -> dict[str, str] | None:
-        if repo_root is None:
-            return None
-
-        env = os.environ.copy()
-        existing_pythonpath = env.get("PYTHONPATH")
-        env["PYTHONPATH"] = (
-            str(repo_root)
-            if not existing_pythonpath
-            else f"{repo_root}{os.pathsep}{existing_pythonpath}"
-        )
-        return env
-
-    @staticmethod
-    def _short_prompt_text(text: str, max_chars: int = 180) -> str:
-        text = " ".join(str(text).split())
-        if len(text) <= max_chars:
-            return text
-        return text[:max_chars].rsplit(" ", 1)[0] or text[:max_chars]
-
-    def _run_command(
-        self,
-        command: list[str],
-        step_name: str,
-        *,
-        cwd: Path | None = None,
-        env: dict[str, str] | None = None,
-    ) -> None:
-        logger.info("Starting %s: %s", step_name, " ".join(command))
-        try:
-            completed = subprocess.run(
-                command,
-                cwd=cwd,
-                env=env,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=self.settings.command_timeout_seconds,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(
-                f"{step_name} timed out after {self.settings.command_timeout_seconds} seconds."
-            ) from exc
-
-        if completed.returncode != 0:
-            logger.error(
-                "%s failed with exit code %s. stdout=%s stderr=%s",
-                step_name,
-                completed.returncode,
-                completed.stdout,
-                completed.stderr,
-            )
-            raise RuntimeError(
-                f"{step_name} failed with exit code {completed.returncode}: {completed.stderr}"
-            )
-
-        logger.info("%s completed. stdout=%s", step_name, completed.stdout)
 
     @staticmethod
     def _chunk_text_for_translation(text: str, tokenizer, max_tokens: int = 850) -> list[str]:

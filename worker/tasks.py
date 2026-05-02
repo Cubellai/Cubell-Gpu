@@ -103,16 +103,15 @@ def run_pipeline_steps(
     translation_path.write_text(translated_text, encoding="utf-8")
 
     progress_callback("Generating voice", 60)
-    voice_path = pipeline.generate_voice(
-        text=translated_text,
-        target_language=target_language,
+    voice_path = Path(
+        pipeline.generate_voice(
+            text=translated_text,
+            language=target_language,
+        )
     )
 
     progress_callback("Lip sync", 85)
-    final_video_path = pipeline.lip_sync(
-        original_video_path=original_video_path,
-        generated_audio_path=voice_path,
-    )
+    final_video_path = Path(pipeline.lip_sync(str(original_video_path), str(voice_path)))
     if final_video_path != result_path:
         raise RuntimeError(f"Lip sync wrote unexpected output path: {final_video_path}")
 
@@ -234,16 +233,15 @@ def run_non_database_job(job_id: str, settings) -> None:
     translation_path.write_text(translated_text, encoding="utf-8")
 
     log_progress("Generating voice", 60)
-    voice_path = pipeline.generate_voice(
-        text=translated_text,
-        target_language=target_language,
+    voice_path = Path(
+        pipeline.generate_voice(
+            text=translated_text,
+            language=target_language,
+        )
     )
 
     log_progress("Lip sync", 85)
-    final_video_path = pipeline.lip_sync(
-        original_video_path=original_video_path,
-        generated_audio_path=voice_path,
-    )
+    final_video_path = Path(pipeline.lip_sync(str(original_video_path), str(voice_path)))
     if final_video_path != result_path:
         raise RuntimeError(f"Lip sync wrote unexpected output path: {final_video_path}")
 

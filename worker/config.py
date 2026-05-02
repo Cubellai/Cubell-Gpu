@@ -14,10 +14,10 @@ class Settings(BaseSettings):
     whisper_model: str = "openai/whisper-large-v3"
     nllb_model: str = "facebook/nllb-200-1.3B"
     nllb_source_language_code: str = "eng_Latn"
-    fish_speech_model_path: Path = Path("/workspace/fish-speech/checkpoints/s2-pro")
-    fish_speech_prompt_text: str | None = None
-    fish_speech_prompt_tokens_path: Path | None = None
-    musetalk_script: Path = Path("/workspace/musetalk/inference.sh")
+    elevenlabs_voice_id: str = "21m00Tcm4TlvDq8ikWAM"
+    elevenlabs_model_id: str = "eleven_multilingual_v2"
+    elevenlabs_reference_audio_path: Path | None = None
+    elevenlabs_cloned_voice_name: str = "Cubell cloned voice"
     require_cuda: bool = True
     command_timeout_seconds: int = Field(default=3600, ge=1)
     r2_bucket_name: str | None = None
