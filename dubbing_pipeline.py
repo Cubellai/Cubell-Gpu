@@ -556,11 +556,15 @@ class DubbingPipeline:
             raise RuntimeError("transformers is required for NLLB translation.") from exc
 
         logger.info("Loading NLLB translation model: %s", self.nllb_model)
-        tokenizer = AutoTokenizer.from_pretrained(self.nllb_model)
+        tokenizer = AutoTokenizer.from_pretrained(
+            self.nllb_model,
+            trust_remote_code=True,
+        )
         model = AutoModelForSeq2SeqLM.from_pretrained(
             self.nllb_model,
             torch_dtype=self.torch_dtype,
-            use_safetensors=True,
+            trust_remote_code=True,
+            use_safetensors=False,
         ).to(self.device)
         model.eval()
         logger.info("Loaded NLLB translation model on %s", self.device)
