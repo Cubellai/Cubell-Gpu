@@ -405,9 +405,8 @@ class DubbingPipeline:
         if not output_path.is_file():
             raise RuntimeError(f"ElevenLabs WAV output was not created: {output_path}")
 
-    @staticmethod
-    def _require_elevenlabs_api_key() -> str:
-        api_key = os.getenv("ELEVENLABS_API_KEY")
+    def _require_elevenlabs_api_key(self) -> str:
+        api_key = self.settings.elevenlabs_api_key or os.getenv("ELEVENLABS_API_KEY")
         if not api_key:
             raise RuntimeError("ELEVENLABS_API_KEY must be set to generate voice.")
         return api_key

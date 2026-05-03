@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     whisper_model: str = "openai/whisper-large-v3"
     nllb_model: str = "facebook/nllb-200-1.3B"
     nllb_source_language_code: str = "eng_Latn"
+    elevenlabs_api_key: str | None = None
     elevenlabs_voice_id: str = "21m00Tcm4TlvDq8ikWAM"
     elevenlabs_model_id: str = "eleven_multilingual_v2"
     elevenlabs_reference_audio_path: Path | None = None
