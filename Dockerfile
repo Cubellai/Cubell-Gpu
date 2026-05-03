@@ -16,11 +16,14 @@ RUN apt-get update \
 COPY pyproject.toml ./
 COPY requirements.txt ./
 COPY dubbing_pipeline.py ./
+COPY cubell ./cubell
 COPY worker ./worker
+COPY start_worker.sh ./
 
 RUN pip install --upgrade pip \
     && pip install -r requirements.txt \
-    && pip install .
+    && pip install . \
+    && chmod +x /worker/start_worker.sh
 
 RUN useradd --create-home --uid 10001 worker \
     && mkdir -p /app/storage/results /app/storage/worker-temp /app/storage/model-cache \
@@ -29,4 +32,4 @@ RUN useradd --create-home --uid 10001 worker \
 USER worker
 
 ENTRYPOINT ["tini", "--"]
-CMD ["sh", "-c", "celery -A worker.celery_app.celery_app worker --loglevel=${LOG_LEVEL:-INFO} --queues=${DUBBING_QUEUE:-dubbing} --concurrency=${WORKER_CONCURRENCY:-1} --prefetch-multiplier=1"]
+CMD ["./start_worker.sh"]

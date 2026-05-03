@@ -43,7 +43,7 @@ cp .env.example .env
 Run the worker:
 
 ```bash
-celery -A worker.celery_app.celery_app worker --loglevel=INFO --queues=dubbing
+./start_worker.sh
 ```
 
 ## Docker

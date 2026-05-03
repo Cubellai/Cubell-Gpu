@@ -1,21 +1,9 @@
-from celery import Celery
+"""Compatibility wrapper for older worker.celery_app imports.
 
-from worker.config import get_settings
+Use ``cubell.gpu_worker`` as the Celery app entrypoint for new worker startup
+commands.
+"""
 
-settings = get_settings()
+from cubell.gpu_worker import app, celery, celery_app
 
-celery_app = Celery(
-    "cubell_gpu_worker",
-    broker=settings.redis_url,
-    backend=settings.redis_url,
-    include=["worker.tasks"],
-)
-
-celery_app.conf.update(
-    task_acks_late=True,
-    task_default_queue=settings.dubbing_queue,
-    task_reject_on_worker_lost=True,
-    task_track_started=True,
-    worker_prefetch_multiplier=1,
-    timezone="UTC",
-)
+__all__ = ["app", "celery", "celery_app"]

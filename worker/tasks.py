@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from dubbing_pipeline import DubbingPipeline
-from worker.celery_app import celery_app
+from cubell.gpu_worker import celery_app
 from worker.config import get_settings
 from worker.db import Job, JobStatus, SessionLocal
 from worker.storage import JobStorage
