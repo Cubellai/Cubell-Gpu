@@ -107,6 +107,7 @@ def run_pipeline_steps(
         pipeline.generate_voice(
             text=translated_text,
             language=target_language,
+            reference_video_path=original_video_path,
         )
     )
 
@@ -237,6 +238,7 @@ def run_non_database_job(job_id: str, settings) -> None:
         pipeline.generate_voice(
             text=translated_text,
             language=target_language,
+            reference_video_path=original_video_path,
         )
     )
 

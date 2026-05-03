@@ -2,12 +2,14 @@ import json
 import logging
 import os
 import re
+import subprocess
 import time
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 
 from worker.config import get_settings
+from worker.storage import JobStorage
 
 os.environ.setdefault("TRANSFORMERS_NO_TORCHVISION", "1")
 os.environ.setdefault("TRANSFORMERS_NO_VISION", "1")
@@ -15,10 +17,12 @@ os.environ.setdefault("TRANSFORMERS_NO_VISION", "1")
 logger = logging.getLogger(__name__)
 
 NLLB_MODEL_NAME = "facebook/nllb-200-distilled-1.3B"
-SYNCLABS_API_BASE_URL = "https://api.synclabs.so"
-SYNCLABS_LIP_SYNC_ENDPOINT = f"{SYNCLABS_API_BASE_URL}/v1/lip-sync"
-SYNCLABS_POLL_INTERVAL_SECONDS = 10
-SYNCLABS_TERMINAL_STATUSES = {"COMPLETED", "FAILED", "REJECTED"}
+SYNC_API_BASE_URL = "https://api.sync.so"
+SYNC_GENERATE_ENDPOINT = f"{SYNC_API_BASE_URL}/v2/generate"
+SYNC_TERMINAL_STATUSES = {"COMPLETED", "FAILED", "REJECTED"}
+SYNCLABS_API_BASE_URL = SYNC_API_BASE_URL
+SYNCLABS_LIP_SYNC_ENDPOINT = SYNC_GENERATE_ENDPOINT
+SYNCLABS_TERMINAL_STATUSES = SYNC_TERMINAL_STATUSES
 ELEVENLABS_API_BASE_URL = "https://api.elevenlabs.io"
 
 NLLB_LANGUAGE_CODES = {
@@ -56,7 +60,7 @@ class DubbingPipeline:
     """Dubbing pipeline wired to the worker task interface.
 
     Transcription and translation use real Whisper and NLLB models. Voice
-    generation uses ElevenLabs, and lip sync uses Sync Labs.
+    generation uses ElevenLabs, and lip sync uses Sync.so.
     """
 
     def __init__(
@@ -112,7 +116,13 @@ class DubbingPipeline:
         translation_path.write_text(translated_text, encoding="utf-8")
 
         self.set_job_id(input_video.stem)
-        voice_path = Path(self.generate_voice(text=translated_text, language=target_language))
+        voice_path = Path(
+            self.generate_voice(
+                text=translated_text,
+                language=target_language,
+                reference_video_path=input_video,
+            )
+        )
         output_video = Path(self.lip_sync(str(input_video), str(voice_path)))
 
         return DubbingResult(
@@ -201,7 +211,12 @@ class DubbingPipeline:
     def set_job_id(self, job_id: str) -> None:
         self.job_id = self._safe_path_stem(job_id)
 
-    def generate_voice(self, text: str, language: str = "es") -> str:
+    def generate_voice(
+        self,
+        text: str,
+        language: str = "es",
+        reference_video_path: str | Path | None = None,
+    ) -> str:
         if not text or not text.strip():
             raise ValueError("Cannot generate voice from empty text.")
 
@@ -211,11 +226,15 @@ class DubbingPipeline:
         logger.info("Generating voice using ElevenLabs for job %s in %s", self.job_id, language)
         print(f"Generating voice using ElevenLabs for: {language}")
 
-        voice_id = self._elevenlabs_voice_id()
-        audio_bytes = self._generate_voice_with_elevenlabs(
-            text=text,
-            voice_id=voice_id,
-        )
+        voice_id, delete_after_use = self._elevenlabs_voice_id(reference_video_path)
+        try:
+            audio_bytes = self._generate_voice_with_elevenlabs(
+                text=text,
+                voice_id=voice_id,
+            )
+        finally:
+            if delete_after_use:
+                self._delete_elevenlabs_voice(voice_id)
         self._write_elevenlabs_wav(audio_bytes=audio_bytes, output_path=output_path)
 
         logger.info("ElevenLabs voice generation completed: %s", output_path)
@@ -223,20 +242,57 @@ class DubbingPipeline:
 
         return str(output_path)
 
-    def _elevenlabs_voice_id(self) -> str:
+    def _elevenlabs_voice_id(self, reference_video_path: str | Path | None = None) -> tuple[str, bool]:
         reference_audio_path = self.settings.elevenlabs_reference_audio_path
-        if reference_audio_path is None:
-            return self.settings.elevenlabs_voice_id
+        delete_after_use = False
 
-        reference_audio_path = Path(reference_audio_path).expanduser()
-        if not reference_audio_path.is_file():
-            raise FileNotFoundError(
-                "ELEVENLABS_REFERENCE_AUDIO_PATH must point to a real audio file. "
-                f"Missing: {reference_audio_path}"
-            )
+        if reference_audio_path is not None:
+            reference_audio_path = Path(reference_audio_path).expanduser()
+            if not reference_audio_path.is_file():
+                raise FileNotFoundError(
+                    "ELEVENLABS_REFERENCE_AUDIO_PATH must point to a real audio file. "
+                    f"Missing: {reference_audio_path}"
+                )
+        elif reference_video_path is not None:
+            reference_audio_path = self._extract_reference_audio(reference_video_path)
+            delete_after_use = True
+        else:
+            return self.settings.elevenlabs_voice_id, False
 
         logger.info("Creating ElevenLabs cloned voice from %s", reference_audio_path)
-        return self._create_elevenlabs_voice_clone(reference_audio_path)
+        return self._create_elevenlabs_voice_clone(reference_audio_path), delete_after_use
+
+    def _extract_reference_audio(self, video_path: str | Path) -> Path:
+        video_path = Path(video_path)
+        if not video_path.is_file():
+            raise FileNotFoundError(f"Cannot extract ElevenLabs reference audio from missing video: {video_path}")
+
+        output_path = self.settings.worker_temp_dir / f"{self.job_id}_reference_voice.wav"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        command = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(video_path),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "44100",
+            "-t",
+            str(self.settings.elevenlabs_reference_audio_seconds),
+            str(output_path),
+        ]
+        logger.info("Extracting ElevenLabs reference audio: %s", " ".join(command))
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            raise RuntimeError(
+                "Failed to extract ElevenLabs reference audio with ffmpeg "
+                f"(exit {result.returncode}): {result.stderr or result.stdout}"
+            )
+        if not output_path.is_file():
+            raise RuntimeError(f"Reference audio extraction did not create expected file: {output_path}")
+        return output_path
 
     def _create_elevenlabs_voice_clone(self, reference_audio_path: Path) -> str:
         import requests
@@ -277,6 +333,28 @@ class DubbingPipeline:
 
         logger.info("Created ElevenLabs cloned voice: %s", voice_id)
         return voice_id
+
+    def _delete_elevenlabs_voice(self, voice_id: str) -> None:
+        import requests
+
+        api_key = self._require_elevenlabs_api_key()
+        try:
+            response = requests.delete(
+                f"{ELEVENLABS_API_BASE_URL}/v1/voices/{voice_id}",
+                headers={"xi-api-key": api_key},
+                timeout=60,
+            )
+        except requests.RequestException as exc:
+            logger.warning("Failed to delete temporary ElevenLabs voice %s: %s", voice_id, exc)
+            return
+
+        if response.status_code >= 400:
+            logger.warning(
+                "Failed to delete temporary ElevenLabs voice %s (%s): %s",
+                voice_id,
+                response.status_code,
+                response.text,
+            )
 
     def _generate_voice_with_elevenlabs(self, *, text: str, voice_id: str) -> bytes:
         import requests
@@ -348,139 +426,171 @@ class DubbingPipeline:
         return "application/octet-stream"
 
     def lip_sync(self, video_path: str, audio_path: str) -> str:
-        """Run Sync Labs lip sync and download the completed video locally."""
+        """Run Sync.so lip sync and download the completed video locally."""
         video_file = Path(video_path)
         audio_file = Path(audio_path)
         if not video_file.is_file():
-            raise FileNotFoundError(f"Original video not found for Sync Labs lip sync: {video_file}")
+            raise FileNotFoundError(f"Original video not found for Sync.so lip sync: {video_file}")
         if not audio_file.is_file():
-            raise FileNotFoundError(f"Generated audio not found for Sync Labs lip sync: {audio_file}")
+            raise FileNotFoundError(f"Generated audio not found for Sync.so lip sync: {audio_file}")
 
-        api_key = os.getenv("SYNCLABS_API_KEY")
-        if not api_key:
-            raise RuntimeError("SYNCLABS_API_KEY must be set to run Sync Labs lip sync.")
+        api_key = self._require_sync_api_key()
 
         output_video = self.settings.result_dir / f"{self.job_id}.mp4"
         output_video.parent.mkdir(parents=True, exist_ok=True)
 
         logger.info(
-            "Starting Sync Labs lip sync for job %s: video=%s audio=%s output=%s",
+            "Starting Sync.so lip sync for job %s: video=%s audio=%s output=%s",
             self.job_id,
             video_file,
             audio_file,
             output_video,
         )
-        print(f"Performing Sync Labs lip sync: {video_file} -> {output_video}")
+        print(f"Performing Sync.so lip sync: {video_file} -> {output_video}")
 
-        job_id = self._create_synclabs_lip_sync_job(
+        temporary_object_keys: list[str] = []
+        job_id = self._create_sync_lip_sync_job(
             api_key=api_key,
             video_path=video_file,
             audio_path=audio_file,
+            temporary_object_keys=temporary_object_keys,
         )
-        output_url = self._poll_synclabs_lip_sync_job(api_key=api_key, job_id=job_id)
-        self._download_synclabs_output(output_url=output_url, output_path=output_video)
+        output_url = self._poll_sync_lip_sync_job(api_key=api_key, job_id=job_id)
+        self._download_sync_output(output_url=output_url, output_path=output_video)
 
         if not output_video.is_file():
-            raise RuntimeError(f"Sync Labs did not create expected video file: {output_video}")
-        logger.info("Generated Sync Labs dubbed video for job %s: %s", self.job_id, output_video)
+            raise RuntimeError(f"Sync.so did not create expected video file: {output_video}")
+        self._cleanup_sync_inputs(temporary_object_keys)
+        logger.info("Generated Sync.so dubbed video for job %s: %s", self.job_id, output_video)
         return str(output_video)
 
-    def _create_synclabs_lip_sync_job(
+    def _create_sync_lip_sync_job(
         self,
         *,
         api_key: str,
         video_path: Path,
         audio_path: Path,
+        temporary_object_keys: list[str] | None = None,
     ) -> str:
         import requests
 
-        headers = {"x-api-key": api_key}
-        data = {
-            "model": "lipsync-2",
-            "sync_mode": "cut_off",
+        storage = JobStorage(self.settings)
+        video_key = self._sync_input_object_key(video_path, "video")
+        audio_key = self._sync_input_object_key(audio_path, "audio")
+        if temporary_object_keys is not None:
+            temporary_object_keys.extend((video_key, audio_key))
+
+        video_url = storage.upload_public_file(
+            video_path,
+            video_key,
+            content_type=self._video_content_type(video_path),
+        )
+        audio_url = storage.upload_public_file(
+            audio_path,
+            audio_key,
+            content_type=self._audio_content_type(audio_path),
+        )
+
+        headers = {
+            "x-api-key": api_key,
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": self.settings.sync_model,
+            "input": [
+                {"type": "video", "url": video_url},
+                {"type": "audio", "url": audio_url},
+            ],
         }
 
-        # Sync Labs accepts the source media as multipart files on /v1/lip-sync.
-        # Keep the files open only for the request lifetime so large media is not
-        # loaded fully into Python memory.
-        with video_path.open("rb") as video_file, audio_path.open("rb") as audio_file:
-            files = {
-                "video": (video_path.name, video_file, "video/mp4"),
-                "audio": (audio_path.name, audio_file, "audio/wav"),
-            }
+        logger.info("Submitting Sync.so lip sync job to %s: %s", SYNC_GENERATE_ENDPOINT, payload)
+        try:
             response = requests.post(
-                SYNCLABS_LIP_SYNC_ENDPOINT,
+                SYNC_GENERATE_ENDPOINT,
                 headers=headers,
-                data=data,
-                files=files,
-                timeout=120,
+                json=payload,
+                timeout=30,
             )
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Sync.so lip sync request failed: {exc}") from exc
 
-        if response.status_code >= 400:
-            raise RuntimeError(
-                "Sync Labs lip sync request failed "
-                f"({response.status_code}): {response.text}"
-            )
+        self._raise_for_sync_http_error(response, "Sync.so lip sync request")
 
-        payload = self._parse_json_response(response, "Sync Labs lip sync request")
-        job_id = self._extract_first_string(payload, ("id", "job_id", "jobId", "generation_id"))
+        response_payload = self._parse_json_response(response, "Sync.so lip sync request")
+        logger.info("Sync.so lip sync response: %s", response_payload)
+        job_id = self._extract_first_string(response_payload, ("id", "job_id", "jobId", "generation_id"))
         if not job_id:
-            raise RuntimeError(f"Sync Labs response did not include a job id: {payload}")
+            raise RuntimeError(f"Sync.so response did not include a job id: {response_payload}")
 
-        logger.info("Sync Labs lip sync job submitted: %s", job_id)
+        logger.info("Sync.so lip sync job submitted: %s", job_id)
         return job_id
 
-    def _poll_synclabs_lip_sync_job(self, *, api_key: str, job_id: str) -> str:
+    def _poll_sync_lip_sync_job(self, *, api_key: str, job_id: str) -> str:
         import requests
 
         headers = {"x-api-key": api_key}
-        status_url = f"{SYNCLABS_LIP_SYNC_ENDPOINT}/{job_id}"
-        deadline = time.monotonic() + self.settings.command_timeout_seconds
+        status_url = f"{SYNC_GENERATE_ENDPOINT}/{job_id}"
+        deadline = time.monotonic() + self.settings.sync_poll_timeout_seconds
 
         while True:
-            response = requests.get(status_url, headers=headers, timeout=60)
-            if response.status_code >= 400:
-                raise RuntimeError(
-                    "Sync Labs status request failed "
-                    f"({response.status_code}): {response.text}"
-                )
+            try:
+                response = requests.get(status_url, headers=headers, timeout=30)
+            except requests.RequestException as exc:
+                raise RuntimeError(f"Sync.so status request failed for job {job_id}: {exc}") from exc
+            self._raise_for_sync_http_error(response, "Sync.so status request")
 
-            payload = self._parse_json_response(response, "Sync Labs status request")
+            payload = self._parse_json_response(response, "Sync.so status request")
             status = (self._extract_first_string(payload, ("status", "state")) or "").upper()
-            logger.info("Sync Labs lip sync job %s status: %s", job_id, status or "unknown")
+            logger.info("Sync.so lip sync job %s status: %s", job_id, status or "unknown")
 
             if status == "COMPLETED":
-                output_url = self._extract_synclabs_output_url(payload)
+                output_url = self._extract_sync_output_url(payload)
                 if not output_url:
-                    raise RuntimeError(f"Sync Labs job completed without output URL: {payload}")
+                    raise RuntimeError(f"Sync.so job completed without output URL: {payload}")
                 return output_url
 
-            if status in SYNCLABS_TERMINAL_STATUSES:
+            if status in SYNC_TERMINAL_STATUSES:
                 error = payload.get("error") or payload.get("message") or payload
-                raise RuntimeError(f"Sync Labs lip sync job {job_id} ended with {status}: {error}")
+                raise RuntimeError(f"Sync.so lip sync job {job_id} ended with {status}: {error}")
 
             if time.monotonic() >= deadline:
                 raise RuntimeError(
-                    f"Sync Labs lip sync job {job_id} timed out after "
-                    f"{self.settings.command_timeout_seconds} seconds."
+                    f"Sync.so lip sync job {job_id} timed out after "
+                    f"{self.settings.sync_poll_timeout_seconds} seconds."
                 )
 
-            time.sleep(SYNCLABS_POLL_INTERVAL_SECONDS)
+            time.sleep(self.settings.sync_poll_interval_seconds)
 
     @staticmethod
-    def _download_synclabs_output(*, output_url: str, output_path: Path) -> None:
+    def _download_sync_output(*, output_url: str, output_path: Path) -> None:
         import requests
 
-        with requests.get(output_url, stream=True, timeout=300) as response:
+        try:
+            response_context = requests.get(output_url, stream=True, timeout=300)
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Sync.so output download failed: {exc}") from exc
+
+        with response_context as response:
             if response.status_code >= 400:
                 raise RuntimeError(
-                    "Sync Labs output download failed "
+                    "Sync.so output download failed "
                     f"({response.status_code}): {response.text}"
                 )
             with output_path.open("wb") as output_file:
                 for chunk in response.iter_content(chunk_size=1024 * 1024):
                     if chunk:
                         output_file.write(chunk)
+
+    def _cleanup_sync_inputs(self, object_keys: list[str]) -> None:
+        if not object_keys:
+            return
+
+        storage = JobStorage(self.settings)
+        for object_key in object_keys:
+            try:
+                storage.delete_object(object_key)
+            except Exception:
+                logger.warning("Failed to delete temporary Sync.so R2 object: %s", object_key, exc_info=True)
 
     @staticmethod
     def _parse_json_response(response, request_name: str) -> dict:
@@ -500,7 +610,7 @@ class DubbingPipeline:
                 return value
         return None
 
-    def _extract_synclabs_output_url(self, payload: dict) -> str | None:
+    def _extract_sync_output_url(self, payload: dict) -> str | None:
         output_url = self._extract_first_string(
             payload,
             ("output_url", "outputUrl", "video_url", "videoUrl", "url"),
@@ -515,6 +625,50 @@ class DubbingPipeline:
                 ("url", "video_url", "videoUrl", "output_url", "outputUrl"),
             )
         return None
+
+    def _require_sync_api_key(self) -> str:
+        api_key = self.settings.sync_api_key or os.getenv("SYNC_API_KEY") or os.getenv("SYNCLABS_API_KEY")
+        if not api_key:
+            raise RuntimeError("SYNC_API_KEY or SYNCLABS_API_KEY must be set to run Sync.so lip sync.")
+        return api_key
+
+    def _sync_input_object_key(self, path: Path, media_type: str) -> str:
+        suffix = path.suffix.lower()
+        if not suffix:
+            suffix = ".wav" if media_type == "audio" else ".mp4"
+        safe_name = self._safe_path_stem(path.name)
+        return f"sync-inputs/{self.job_id}/{media_type}-{safe_name}{suffix}"
+
+    @staticmethod
+    def _video_content_type(path: Path) -> str:
+        suffix = path.suffix.lower()
+        if suffix == ".mov":
+            return "video/quicktime"
+        if suffix == ".webm":
+            return "video/webm"
+        if suffix == ".mkv":
+            return "video/x-matroska"
+        return "video/mp4"
+
+    @staticmethod
+    def _raise_for_sync_http_error(response, request_name: str) -> None:
+        if response.status_code < 400:
+            return
+        logger.error("%s failed (%s): %s", request_name, response.status_code, response.text)
+        raise RuntimeError(f"{request_name} failed ({response.status_code}): {response.text}")
+
+    def _create_synclabs_lip_sync_job(self, **kwargs) -> str:
+        return self._create_sync_lip_sync_job(**kwargs)
+
+    def _poll_synclabs_lip_sync_job(self, **kwargs) -> str:
+        return self._poll_sync_lip_sync_job(**kwargs)
+
+    @staticmethod
+    def _download_synclabs_output(**kwargs) -> None:
+        DubbingPipeline._download_sync_output(**kwargs)
+
+    def _extract_synclabs_output_url(self, payload: dict) -> str | None:
+        return self._extract_sync_output_url(payload)
 
     def _select_device(self):
         try:

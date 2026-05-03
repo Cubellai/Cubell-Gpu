@@ -1,6 +1,7 @@
 import logging
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from urllib.parse import quote
 
 from worker.config import Settings
 
@@ -56,6 +57,44 @@ class JobStorage:
 
         self._upload_r2_result(prepared_input.result_path, prepared_input.result_reference)
         return prepared_input.result_reference
+
+    def upload_public_file(self, local_path: Path, object_key: str, *, content_type: str) -> str:
+        if not local_path.is_file():
+            raise FileNotFoundError(f"Cannot upload missing file to R2: {local_path}")
+
+        self._require_r2_config()
+        logger.info("Uploading temporary Sync input %s to R2 key %s", local_path, object_key)
+        self._r2_client().upload_file(
+            str(local_path),
+            self.settings.r2_bucket_name,
+            object_key,
+            ExtraArgs={"ContentType": content_type},
+        )
+        return self.public_url_for_key(object_key)
+
+    def public_url_for_key(self, object_key: str) -> str:
+        self._require_r2_config()
+        if self.settings.r2_public_url:
+            base_url = self.settings.r2_public_url.rstrip("/")
+            quoted_key = "/".join(quote(part) for part in PurePosixPath(object_key).parts)
+            return f"{base_url}/{quoted_key}"
+
+        return self._r2_client().generate_presigned_url(
+            "get_object",
+            Params={
+                "Bucket": self.settings.r2_bucket_name,
+                "Key": object_key,
+            },
+            ExpiresIn=self.settings.r2_presigned_url_expiration_seconds,
+        )
+
+    def delete_object(self, object_key: str) -> None:
+        self._require_r2_config()
+        logger.info("Deleting temporary R2 object %s", object_key)
+        self._r2_client().delete_object(
+            Bucket=self.settings.r2_bucket_name,
+            Key=object_key,
+        )
 
     @property
     def is_r2_configured(self) -> bool:
